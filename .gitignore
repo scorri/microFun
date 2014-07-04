@@ -1,0 +1,20 @@
+# ignore GS folders
+GS_ocl/Debug/
+GS_ocl/Release/
+GS_ocl/ipch/
+GS_ocl/Grey\ Scott/Debug
+GS_ocl/Grey\ Scott/Release
+
+# ignore microFun folders
+microFun_DX/Debug/
+microFun_DX/Release/
+microFun_DX/ipch/
+microFun_DX/image_grabs/
+
+# ignore file types
+*.opensdf
+*.sdf
+*.sln
+*.suo
+*.vcxpro*
+
