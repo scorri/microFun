@@ -151,11 +151,11 @@ struct CB_MouseInfo
 struct CB_DisplayInfo
 {
 	D3DXMATRIXA16 wvp;
-	UINT ins;
-	UINT ni;
-	UINT mb;
-	UINT all;
-	UINT ex_re;
+	int ins;
+	int ni;
+	int mb;
+	int all;
+	int ex_re;
 	UINT geometry;
 	
 };
@@ -163,6 +163,13 @@ struct CB_DisplayInfo
 struct CB_ObjectInfo
 {
 	D3DXMATRIX wvp;
+};
+struct DebugProcessBufType
+{
+	scalar uptake;
+	scalar insul;
+	scalar mob_i;
+	scalar mob_n;
 };
 
 struct DebugBufType
@@ -195,9 +202,19 @@ public:
 private:
 	void Initialize();                                  // initialize the demo application
 	void RenderText();
-	void CollectTimeStamps();
-	
+
 	HRESULT CreateComputeDevice();                      // create a DirectCompute device
+
+	HRESULT DemoApp::CreateStagingBufferResourceAndUAVView ///create a staging buffer and UAV another combination of resources....
+		(
+	UINT uElementSize,
+	UINT uNumElements,
+	const void* pInitialData,
+	ID3D11Buffer** ppBuffer,
+	ID3D11Buffer** ppStagingBuffer,
+	ID3D11ShaderResourceView** ppBufferSRV,
+	ID3D11UnorderedAccessView** ppBufferUAV
+	);
 	
 	HRESULT CreateStagingBuffer
 	(
@@ -277,10 +294,13 @@ private:
 	
 
 
+	//CB_DebugInfo
+
 private:
 	ID3D11Buffer*               m_pBiomassBuffer0;       // a general buffer for storing cell state information
 	ID3D11Buffer*               m_pBiomassBuffer1;       // a general buffer for storing cell state information
 	ID3D11Texture3D*			m_p3DTexBioBuff;
+	ID3D11Buffer*				m_pDebugProcessBuffer;
 	ID3D11ShaderResourceView*   m_pBiomassBuffer0SRV;    // a read-only view of the first cell state buffer
 	ID3D11UnorderedAccessView*  m_pBiomassBuffer0UAV;    // a read-write view of the first cell state buffer
 	ID3D11ShaderResourceView*   m_pBiomassBuffer1SRV;    // a read-only view of the second cell state buffer
@@ -290,8 +310,11 @@ private:
 	ID3D11Texture3D*			m_p3DTexStructBuff;
 	ID3D11ShaderResourceView*   m_p3DTexStructSRV;			 // a read-only view of the 3D texture for pixels shader
 
- 
-	ID3D11Buffer*               m_pDebugStagingBuffer;
+	ID3D11Buffer*				m_pDebugStagingBuffer;
+	ID3D11Buffer*				m_pBuffer;
+	ID3D11Buffer*               m_pDebugProcessesStagingBuffer;
+	ID3D11UnorderedAccessView*  m_DebugProcessesStagingUAV; // a unordered access view of the Debug buffwe
+
 
  
 
@@ -344,11 +367,4 @@ private:
 	GameTimer mTimer;
 	bool      mAppPaused;
 
-	ID3D11Query* pComputeEventQuery;	
-	ID3D11Query* pDisjointQuery;	
-	ID3D11Query* pBeginFrameQuery;
-	D3D11_QUERY_DESC qd1;	
-	D3D11_QUERY_DESC qd2;	
-	D3D11_QUERY_DESC qd3;
-	
 };

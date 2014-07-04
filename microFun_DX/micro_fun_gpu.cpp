@@ -9,16 +9,7 @@
 \+==============================================================+*/
 
 //TO DO
-//Add camera class
-//Check conservation - where its going wrong - doubles versus floats -- test doubles on als machine...
-//Summarize code structure to date
-//periodic boundary conditions - change to reflective..
-//not a 1:1 relationship between pixels & threads
-//SOIL structure
-//REMOVE PERIODIC BOUNDARY CONDITIONS
-//LOAD in different DOC maps based on MEPSOM simulations, not have DOC-POM 
-//tweakbar is not that responsive...test this
-//fps
+
 
 ////FOR PAPER///////////////////////
 //typedef between float & double
@@ -31,7 +22,6 @@
 #include "mico_fun_gpu.h"
 #include "AntTweakBar.h"	// We use this for GUI tweaking of variables during runtime
 #include "Box.h"
-
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -47,6 +37,7 @@ static int counter=0;
 ByteArray gByteArray={0,};
 scalar carbonMap[BUFFER_SIZE_X][BUFFER_SIZE_Y][BUFFER_SIZE_Z]={0.0};
 Box mBox;
+
 fstream MatLab;
 
 struct VOLUMEVERTEX
@@ -158,6 +149,8 @@ void DemoApp::Initialize()
 	m_pBiomassBuffer1 = NULL;
 	m_p3DTexBioBuff = NULL;
 
+	m_pDebugProcessBuffer=NULL;
+
 	m_pBiomassBuffer0SRV = NULL;
 	m_pBiomassBuffer0UAV = NULL;
 	m_pBiomassBuffer1SRV = NULL;
@@ -181,7 +174,6 @@ void DemoApp::Initialize()
 	m_pVertexBufferXNeg = NULL;
 	m_pPixelShader = NULL;
 
-
 	srand( (UINT)time( NULL ) );
 
 	D3DXMatrixIdentity(&m_projectionMatrix);
@@ -197,13 +189,6 @@ void DemoApp::Initialize()
 	GetCamera().rebuildView();
 
 	mAppPaused=false;
-
-		//To profile a portion of your frame, you need a trio of ID3D11Query objects. Two of them need to have the type D3D11_QUERY_TIMESTAMP, and are used to get the GPU timestamp at the start and end of the block you want to profile. The third needs to have the type D3D11_QUERY_TIMESTAMP_DISJOINT, and it tells you whether your timestamps are invalid as well as the frequency used for converting from ticks to seconds.
-	ID3D11Query *pComputeEventQuery=NULL;
-
-	ID3D11Query *pDisjointQuery=NULL;
-
-	ID3D11Query *pBeginFrameQuery=NULL;
 }
 
 struct PixRGBAU8
@@ -261,7 +246,7 @@ bool setupStructureData (void)
 //	VolStat				vs;
 	ByteArray			*pF= NULL;
 
-	if (loadRaw(".//s1centre(200,200,200).u8", (UINT8*)(gByteArray.b), sizeof(gByteArray)))
+	if (loadRaw("s1centre(200,200,200).u8", (UINT8*)(gByteArray.b), sizeof(gByteArray)))
 	{
 		//setPalette(gPalette+pI[4].min, pI[4].max - pI[4].min, pC[4]);
 		//setHistogramUB(&(gByteArray.b[0][0][0]), FILE_X_DIM*FILE_Y_DIM*FILE_Z_DIM, gHist);
@@ -274,16 +259,16 @@ bool setupStructureData (void)
 } // setupVolData
 bool setUpCarbonMap (void)
 {
-		ifstream inFile(".//carbon.txt.txt", ios::in); //inFile object name
+		ifstream inFile("carbon.txt.txt", ios::in); //inFile object name
 		if(!inFile)
 		{
 			cerr << "ERROR opening C map data file" << endl;
 			//return(0);
 			return false;
 		}	
-		double	min=	1E34f;
-		double	max=	-1E34f;
-		double	v, tot=0.0;
+		scalar	min=	1E34f;
+		scalar	max=	-1E34f;
+		scalar	v, tot=0.0;
 		int		nz= 0;
 
 		for(int k=0; k<BUFFER_SIZE_Z; k++)
@@ -294,13 +279,13 @@ bool setUpCarbonMap (void)
 				{	
 					inFile >> v;
 					//cout << v << " " ;
-					if (0 != v)
+					//if (v>0)
 					{
 						nz++;
 						tot+=	 v;
 						if (v > max) max=	(float)v;		
 						if (v < min) min=	(float)v;	
-						carbonMap[i][j][k]= v*2.652500e-04;//(float)v;
+						carbonMap[i][j][k]=265.2500e-06;//(float)v; gByteArray.b[i][j][k]*2.652500e-04;
 						if (v>0)
 						{
 						//gByteArray.b[i][j][k]='255';
@@ -318,7 +303,7 @@ bool setUpCarbonMap (void)
 		return(true);
 
 
-} // setupVolData
+} // setupCarbonData
 
 bool cheqPixRGBAU8 (PixRGBAU8 * const pPix, const V3U32& dim)
 {
@@ -484,7 +469,6 @@ HRESULT DemoApp::Run()
 	m_DisplayInfo.ins=1;
 	m_DisplayInfo.ni=1;
 	m_DisplayInfo.mb=1;
-	m_DisplayInfo.geometry=1;
 	// run the message loop
 	IFR( MessageLoop() );
 
@@ -508,7 +492,8 @@ void DemoApp::InitialiseTweakBar()
 	TwAddVarRW(bar, "Ins display", TW_TYPE_BOOLCPP, &m_DisplayInfo.ins, "");
 	TwAddVarRW(bar, "Mb display", TW_TYPE_BOOLCPP, &m_DisplayInfo.mb, "");
 	TwAddVarRW(bar, "PAUSE ComputeShader", TW_TYPE_BOOLCPP, &mAppPaused, "");
-	
+
+
 }
 
 
@@ -575,7 +560,140 @@ HRESULT DemoApp::CreateComputeDevice()
 	return hr;
 }
 
+HRESULT DemoApp::CreateStagingBufferResourceAndUAVView
+		(
+	UINT uElementSize,
+	UINT uNumElements,
+	const void* pInitialData,
+	ID3D11Buffer** ppBuffer,
+	ID3D11Buffer** ppBufferStaging,
+	ID3D11ShaderResourceView** ppBufferSRV,
+	ID3D11UnorderedAccessView** ppBufferUAV
+	)
+{
 
+HRESULT hr = S_OK;
+
+	// create a buffer description and initialize all elements to zero
+	D3D11_BUFFER_DESC bufferDesc;
+	ZeroMemory( &bufferDesc, sizeof( bufferDesc ) );
+
+	// set the size in bytes of a single element in the buffer
+	bufferDesc.StructureByteStride = max(4,uElementSize);
+
+	// set the total size of the buffer in bytes
+	bufferDesc.ByteWidth = uElementSize * uNumElements;
+
+	// enable the resource as a structured buffer
+	bufferDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+
+	if( ppBufferSRV || ppBufferUAV )
+	{
+		// if we are creating any views of the buffer, we will be binding the resource to a shader, so enable such a binding
+		bufferDesc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+	}
+
+	if( !ppBufferUAV )
+	{
+		// if we are not creating an unordered access (read-write) view of the buffer, then we can enable such optimizations by setting the resource as immutable
+		bufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+	}
+	else
+	{
+		// if we are creating a unordered access (read-write) view of the buffer, then enable such a binding
+		bufferDesc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+
+		// in this case, we cannot make any additional optimizations, so set the resource usage to default
+		bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+	}
+
+	if( pInitialData )
+	{
+
+		// if we have data to initialize the resource with, create a subresource to pass the initial data with, and initialize all elements to zero
+		D3D11_SUBRESOURCE_DATA InitialSRData;
+		ZeroMemory( &InitialSRData, sizeof( InitialSRData ) );
+
+		// set the location of the initial data
+		InitialSRData.pSysMem = pInitialData;
+		InitialSRData.SysMemPitch= uElementSize * 1;
+		InitialSRData.SysMemSlicePitch= uElementSize *1;
+		*ppBuffer= NULL;
+		// create the buffer resource with this description using the initial data provided
+		hr= m_pDevice->CreateBuffer( &bufferDesc, &InitialSRData, ppBuffer );
+		IFR( hr );
+	}
+	else
+	{
+		// create the buffer resource with this description with no initial data
+		IFR( m_pDevice->CreateBuffer( &bufferDesc, NULL, ppBuffer ) );
+	}
+
+	if( ppBufferSRV )
+	{
+		// if we wish to create a shader resource view (read-only), create a view description and initialize all elements to zero
+		D3D11_SHADER_RESOURCE_VIEW_DESC viewDescSRV;
+		ZeroMemory( &viewDescSRV, sizeof( viewDescSRV ) );
+
+		// elements in the buffer may not be a standard structure, so set the format to unknown
+		viewDescSRV.Format = DXGI_FORMAT_UNKNOWN;
+
+		// this will be a buffer view of the resource
+		viewDescSRV.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+
+		// set the view to start with the first element
+		viewDescSRV.Buffer.FirstElement = 0;
+
+		// set the view to span the entire resource
+		viewDescSRV.Buffer.NumElements = uNumElements;
+
+		// create the shader resource view of the buffer with this description
+		IFR( m_pDevice->CreateShaderResourceView( *ppBuffer, &viewDescSRV, ppBufferSRV ) );
+	}
+
+	if( ppBufferUAV )
+	{
+		// if we wish to create a unordered access view (read-write), create a view description and initialize all elements to zero
+		D3D11_UNORDERED_ACCESS_VIEW_DESC viewDescUAV;
+		ZeroMemory( &viewDescUAV, sizeof( viewDescUAV ) );
+
+		// elements in the buffer may not be a standard structure, so set the format to unknown
+		viewDescUAV.Format = DXGI_FORMAT_UNKNOWN;
+
+		// this will be a buffer view of the resource
+		viewDescUAV.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+
+		// set the view to start with the first element
+		viewDescUAV.Buffer.FirstElement = 0;
+
+		// set the view to span the entire resource
+		viewDescUAV.Buffer.NumElements = uNumElements;
+
+		// create the unordered access view of the buffer with this description
+		IFR( m_pDevice->CreateUnorderedAccessView( *ppBuffer, &viewDescUAV, ppBufferUAV ) );
+	}
+
+	if(ppBufferStaging)
+	{
+		// create a buffer description and initialize all elements to zero
+	D3D11_BUFFER_DESC bufferDesc;
+
+	ZeroMemory( &bufferDesc, sizeof( bufferDesc ) );	// clear everything
+
+	bufferDesc.StructureByteStride = uElementSize;	// single element size in bytes
+	bufferDesc.ByteWidth = uElementSize * uNumElements; // total size in bytes
+
+	bufferDesc.BindFlags=		0;	// not bound to any shaders
+	bufferDesc.Usage=			D3D11_USAGE_STAGING;
+	bufferDesc.CPUAccessFlags=	D3D11_CPU_ACCESS_READ;
+
+	// create the buffer resource with this description with no initial data
+	hr= m_pDevice->CreateBuffer( &bufferDesc, NULL, ppBufferStaging );
+
+	}
+
+	return hr;
+}
 /******************************************************************
 *                                                                 *
 *  DemoApp::CreateBufferResourceAndViews                          *
@@ -631,8 +749,7 @@ HRESULT DemoApp::CreateBufferResourceAndViews
 
 	if( pInitialData )
 	{
-//InitData.SysMemPitch=	width*sizeof(char);
-//InitData.SysMemSlicePitch=	width*height*sizeof(char);
+
 		// if we have data to initialize the resource with, create a subresource to pass the initial data with, and initialize all elements to zero
 		D3D11_SUBRESOURCE_DATA InitialSRData;
 		ZeroMemory( &InitialSRData, sizeof( InitialSRData ) );
@@ -698,6 +815,7 @@ HRESULT DemoApp::CreateBufferResourceAndViews
 
 	return hr;
 } // DemoApp::CreateBufferResourceAndViews
+
 
 	//create Texture Resource and Views
 HRESULT DemoApp::Create3DStructureTextureResourceAndViews
@@ -1206,7 +1324,7 @@ HRESULT DemoApp::CreateDisplayResources()
 
 	D3D11_SAMPLER_DESC SamplerStateDesc;
     ZeroMemory( &SamplerStateDesc, sizeof(SamplerStateDesc) );
-	SamplerStateDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+	SamplerStateDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 	SamplerStateDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;	
 	SamplerStateDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
 	SamplerStateDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -1247,11 +1365,11 @@ HRESULT DemoApp::CreateDisplayResources()
 	};
 	IFR( m_pDevice->CreateInputLayout( layout, 2, pBlob->GetBufferPointer(), pBlob->GetBufferSize(), &m_pVertexLayout ) );
 
-	SAFE_RELEASE( pBlob );
-	SAFE_RELEASE( pErrorBlob );
-
 	//create bounding box for proxy geometry
 	mBox.init(m_pDevice,m_pContext, 100);
+
+	SAFE_RELEASE( pBlob );
+	SAFE_RELEASE( pErrorBlob );
 
 
 	return hr;
@@ -1279,7 +1397,7 @@ HRESULT DemoApp::CompilePixelShader(
 		NULL,                       // don't use additional defines
 		NULL,                       // don't use additional includes
 		pFunctionName,              // compile this function
-		"ps_5_0",                   // use pixel shader 4.0
+		"ps_4_0",                   // use pixel shader 4.0
 		NULL,                       // no compile flags
 		NULL,                       // no effect flags
 		NULL,                       // don't use a thread pump
@@ -1414,7 +1532,7 @@ HRESULT DemoApp::UpdateDisplayInfoCB()
 
 void layeredCarbon(int pos, int thickness)
 {
-	double sumC=0.0;
+	scalar sumC=0.0;
 	//x plane
 	for( int x=pos-thickness; x<pos+thickness; x++)
 	{
@@ -1423,10 +1541,10 @@ void layeredCarbon(int pos, int thickness)
 			for ( int z = 0; z < BUFFER_SIZE_Z; z++)
 			{
 				
-					if(gByteArray.b[x][y][z]==0)//not structure
+					//if(gByteArray.b[x][y][z]==0)//not structure
 					{
-					carbonMap[x][y][z]= 5*2.652500e-04*1000000;
-				
+					carbonMap[x][y][z]= 265.2500e-06;
+				    //2.652500e-04*1000000
 					sumC+=carbonMap[x][y][z];
 					}
 			//carbonMap[0][y][z]= 2.652500e-04*1000000;
@@ -1446,30 +1564,15 @@ void layeredCarbon(int pos, int thickness)
 HRESULT DemoApp::CreateMycoResources (void)
 {
 		HRESULT hr = S_OK;
-
-		//for querying
-
-			//DO I NEED TO KEEP CREATING A QUERY>>>
-	//Create an event query to sync with GPU
-	qd1.Query=D3D11_QUERY_TIMESTAMP;
-	qd1.MiscFlags=0;
-	m_pDevice->CreateQuery(&qd1, &pComputeEventQuery);
-
-
-	//Create an event query to sync with GPU
-	qd2.Query=D3D11_QUERY_TIMESTAMP_DISJOINT;
-	qd2.MiscFlags=0;
-	m_pDevice->CreateQuery(&qd2, &pDisjointQuery);
-
-	//Create an event query to sync with GPU
-	qd3.Query=D3D11_QUERY_TIMESTAMP;
-	qd3.MiscFlags=0;
-	m_pDevice->CreateQuery(&qd3, &pBeginFrameQuery);
-
 		// create an array to store the initial cell conditions of the Conway buffer
 	BioBufType* pBiomassBuffer = new BioBufType[BUFFER_SIZE_X * BUFFER_SIZE_Y * BUFFER_SIZE_Z];
 	IFR( pBiomassBuffer ? S_OK : E_OUTOFMEMORY );
 
+
+	//create ab array to store te initial Processes staging buffer#
+	DebugProcessBufType* pDebugInitProcessesBuffer=new DebugProcessBufType;
+	pDebugInitProcessesBuffer[0].uptake=10.0; pDebugInitProcessesBuffer[0].insul=0.0; pDebugInitProcessesBuffer[0].mob_i=0.0; pDebugInitProcessesBuffer[0].mob_n=0.0;
+	
 	setupStructureData();
 
 	//layeredCarbon(50,5);
@@ -1494,7 +1597,7 @@ HRESULT DemoApp::CreateMycoResources (void)
 				pBiomassBuffer[i].state =0.0;//rand()%3==0?1:0;
 				pBiomassBuffer[i].mb = 0.0;//rand()%3==0?1:0;
 				pBiomassBuffer[i].ins = 0.0;//rand()%3==0?1:0;
-				pBiomassBuffer[i].ex_re =carbonMap[x][y][z]*1000000;// 2.652500e-04*1000000;//carbonMap[x][y][z];//rand()%3==0?1:0;
+				pBiomassBuffer[i].ex_re =carbonMap[x][y][z]*1000000;//carbonMap[x][y][z];//rand()%3==0?1:0;
 				//conservation+=pBiomassBuffer[i].ex_re;
 				carbon+=pBiomassBuffer[i].ex_re;
 
@@ -1502,59 +1605,43 @@ HRESULT DemoApp::CreateMycoResources (void)
 		}
 	}
 
-	printf(" TOTAL CARBON %f \n", carbon );
 
+	printf(" TOTAL CARBON %f \n", carbon/1000000 );
+
+	scalar inn_vxl=4.755111745e-06;//0.05/(BUFFER_SIZE_Y-2,BUFFER_SIZE_X-2);
+	int por=0;
 	// Initialise some growth by creating a plane of activity in the volume
-
-	//for( int x = 1; x <  BUFFER_SIZE_X-1; x++)
+	int radius = 20;
+	int r2 = radius * radius; 
+	int cx=BUFFER_SIZE_X/2, cy=BUFFER_SIZE_Y/2, cz = BUFFER_SIZE_Z/2;
+	for( int x = 1; x < 2; x++ )
 	//{
-	//	for( int y = 1; y <  BUFFER_SIZE_Y-1; y++ )
-	//	{
-	//		for(int z = 1; z < BUFFER_SIZE_Z-1; z++)
-	//		{
-	//			//const int i= x +(y * BUFFER_SIZE_X )+ (z * BUFFER_SIZE_Y*BUFFER_SIZE_Z);
+		for( int y = 1; y <  BUFFER_SIZE_Y-1; y++ )
+		{
+			for(int z = 1; z < BUFFER_SIZE_Z-1; z++)
+			{
+				//const int i= 1 +(y * BUFFER_SIZE_X )+ (z * BUFFER_SIZE_Y*BUFFER_SIZE_Z);
 
-					//const int i= indexV3U32(0,y,z, V3U32(BUFFER_SIZE_X,BUFFER_SIZE_Y,BUFFER_SIZE_X));
-	
-					//pBiomassBuffer[i].mb = 2.5507601265e-07*1000000;//rand()%3==0?1:0;theta
-					//inn+=pBiomassBuffer[i].mb;
-					//pBiomassBuffer[i].state = 2.5507601265e-07*1000000;//rand()%3==0?1:0;
-					//inn+=pBiomassBuffer[i].state;
-					//pBiomassBuffer[i].ins = 0.0;//rand()%3==0?1:0;
-					//inn+=pBiomassBuffer[i].ins;
-					
-					//randomly allocate innoculation
-					int n=200;
-					while (n>0)
+					const int i= indexV3U32(x,y,z, V3U32(BUFFER_SIZE_X,BUFFER_SIZE_Y,BUFFER_SIZE_X));
+				
+					if(gByteArray.b[z][y][1]==0)
 					{
-						int xr = rand() % 199;  
-						int yr = rand() % 199;  
-						int zr = rand() % 199;  
-
-						//cout << " XR XY XZ  " << xr << " " << yr << " " << zr <<  endl;
-
-						int i= indexV3U32(xr,yr,zr, V3U32(BUFFER_SIZE_X,BUFFER_SIZE_Y,BUFFER_SIZE_X));
-
-						if (gByteArray.b[i]>0)
-						{
-							
-							pBiomassBuffer[i].mb = 2.5507601265e-07*1000000;//rand()%3==0?1:0;theta
-							inn+=pBiomassBuffer[i].mb;
-							pBiomassBuffer[i].state = 2.5507601265e-07*1000000;//rand()%3==0?1:0;
-							inn+=pBiomassBuffer[i].state;
-							pBiomassBuffer[i].ins = 0.0;//rand()%3==0?1:0;
-							inn+=pBiomassBuffer[i].ins;
-							n--;
-						}
-						
+					pBiomassBuffer[i].mb = 0.4*inn_vxl*1000000;//rand()%3==0?1:0;theta
+					inn+=pBiomassBuffer[i].mb;
+					
+					 pBiomassBuffer[i].state = 0.6*inn_vxl*1000000;//rand()%3==0?1:0;
+					inn+=pBiomassBuffer[i].state;
+					
+					pBiomassBuffer[i].ins =  0*inn_vxl*1000000;//rand()%3==0?1:0;
+					inn+=pBiomassBuffer[i].ins;
+					por++;
 					}
 
-					
-		/*			}
-			
 		}
-	}*/
+	}
 	printf(" INN %f \n", inn/1000000 );
+		printf(" PORES %i \n", por);
+
 
 	//mechanism to add hotspots of resources
 	//circle(pBiomassBuffer, float3(450,450,0), 10, 10.0);
@@ -1573,6 +1660,8 @@ HRESULT DemoApp::CreateMycoResources (void)
 	BUFFER_SIZE_X * BUFFER_SIZE_Y * BUFFER_SIZE_Z,
 	&m_pDebugStagingBuffer );
 
+	
+
 	// create two buffers for storing the cell grid
 	IFR( CreateBufferResourceAndViews(
 		sizeof( BioBufType ),
@@ -1585,14 +1674,26 @@ HRESULT DemoApp::CreateMycoResources (void)
 
 
 	IFR( CreateBufferResourceAndViews(
-		sizeof( BioBufType ),
+		sizeof( DebugProcessBufType ),
 		BUFFER_SIZE_X * BUFFER_SIZE_Y * BUFFER_SIZE_Z,
 		pBiomassBuffer,
 		&m_pBiomassBuffer1,
 		&m_pBiomassBuffer1SRV,
 		&m_pBiomassBuffer1UAV ) );
 
-	//	// create structure buffers for storing the soil struct grid
+
+
+		IFR(CreateStagingBufferResourceAndUAVView(
+		sizeof(DebugProcessBufType ),
+		1,
+		pDebugInitProcessesBuffer,
+		&m_pBuffer,
+		&m_pDebugProcessesStagingBuffer,
+		NULL,
+		&m_DebugProcessesStagingUAV ) );
+
+
+		//	// create structure buffers for storing the soil struct grid
 	//IFR( CreateBufferResourceAndViews(
 	//	sizeof( UINT8),
 	//	BUFFER_SIZE_X * BUFFER_SIZE_Y * BUFFER_SIZE_Z,
@@ -1621,6 +1722,7 @@ HRESULT DemoApp::CreateMycoResources (void)
 		&m_p3DTexStructSRV
 		) );
 
+
 	// create a constant buffer for storing mouse information
 	IFR( CreateConstantBuffer(
 		sizeof( CB_MouseInfo ),
@@ -1638,25 +1740,32 @@ HRESULT DemoApp::CreateMycoResources (void)
 	return hr;
 } // DemoApp::CreateConwayResources
 
-void sumDebug (DebugBufType * const pS, const DebugBufType * const pT, int n, int counter )
+void sumDebug (DebugBufTypeD * const pS, const DebugBufType * const pT, int n, int counter )
 {
-	DebugBufType sum={0};
+	DebugBufTypeD sum={0};
 	
-	float min_ni=1000;
-	float max_ni=0;
-	float min_i=1000;
-	float max_i=0;
-	float min_mb=1000;
-	float max_mb=0;
+	scalar min_ni=1000;
+	scalar max_ni=0;
+	scalar min_i=1000;
+	scalar max_i=0;
+	scalar min_mb=1000;
+	scalar max_mb=0;
+	scalar min_re=1000;
+	scalar max_re=0;
+
+	double test=0.0;
+
 
 	if (pT)
 	{
+
+
 		while (n-- > 0)
 		{
-			sum.state+=	(float)pT[n].state;
-			sum.mb+=	(float)pT[n].mb;
-			sum.ins+=	(float)pT[n].ins;
-			sum.ex_re+=	(float)pT[n].ex_re;
+			sum.state+= (double) pT[n].state;
+			sum.mb+=	(double) pT[n].mb;
+			sum.ins+=	(double) pT[n].ins;
+			sum.ex_re+=	(double) pT[n].ex_re;
 
 			if (pT[n].state > max_ni) max_ni=pT[n].state;	
 			if (pT[n].state < min_ni) min_ni=pT[n].state;
@@ -1666,61 +1775,45 @@ void sumDebug (DebugBufType * const pS, const DebugBufType * const pT, int n, in
 
 			if (pT[n].ins > max_i) max_i=pT[n].ins;	
 			if (pT[n].ins < min_i) min_i=pT[n].ins;
+
+			if (pT[n].ex_re > max_re) max_re=pT[n].ex_re;	
+			if (pT[n].ex_re < min_re) min_re=pT[n].ex_re;
 		}
 	}
 	if (pS)
 	{
 		*pS= sum;
 	}
-	float test=sum.state+sum.mb+sum.ex_re+sum.ins;
+	test=sum.state+sum.mb+sum.ex_re+sum.ins;
 	
-	//printf(" ni %g i %g mb %g re %g t %g\n", sum.state/100000,  sum.ins/100000,  sum.mb/100000, sum.ex_re/100000, (test)/100000 );
-	//printf(" maxNI %g minNI %g maxMB %g minMB %g maxMIN %g minMAX %g\n", max_ni,  min_ni,  max_mb,  min_mb, max_i,  min_i);
+	printf(" ni %g i %g mb %g re %g t %g \n", sum.state/1000000,  sum.ins/1000000,  sum.mb/1000000, sum.ex_re/1000000, (test)/1000000);
+	//printf(" maxNI %g minNI %g maxMB %g minMB %g maxIN %g minIN %g maxRe %g minRe %g\n", max_ni/1000000,  min_ni/1000000,  max_mb/1000000,  min_mb/1000000, max_i/1000000,  min_i/1000000, max_re/1000000, min_re/1000000);
 	//print out to file 
 
 	if(counter==1)
-		MatLab.open(".//GPUevolutiondoubles.txt",ios::out);
+		MatLab.open("SV.txt",ios::out);
 
 	else
-		MatLab.open(".//GPUevolutiondoubles.txt",ios::app);	
+		MatLab.open("SV.txt",ios::app);	
 	
-	MatLab << setiosflags( ios::fixed)<< setprecision(6)<< counter << " " << (sum.state+sum.ins+sum.mb)/100000 << "  " << sum.state/100000 <<" "<< sum.ins/100000 <<" "<< sum.mb/100000 <<" "<<  sum.ex_re/100000 << " " << test/100000 <<" "<<endl;	
+	    MatLab << setiosflags( ios::fixed)<< setprecision(10)<< counter << " " << (sum.state+sum.ins+sum.mb)/1000000 << "  " << sum.state/1000000 <<" "<< sum.ins/1000000 <<" "<< sum.mb/1000000<<" "<<  sum.ex_re/1000000 << " " << test/1000000 <<" "<<endl;	
 		//printf("PRINTING output file");
 		MatLab.close();
 
+		ifstream inFile("carbon.txt.txt", ios::in); //inFile object name
+		if(!inFile)
+		{
+			cerr << "ERROR opening C map data file" << endl;
+			//return(0);
+			//return false;
+		}	
+			inFile.close();
+			
+		
+	//
+
 } // sumDebugf
-void DemoApp::CollectTimeStamps()
-{
-		//printf(" IN COLLECT TIMESTAMPS ");
-	// Wait for data to be available
-    while (m_pContext->GetData(pDisjointQuery, NULL, 0, 0) == S_FALSE)
-    {
-        Sleep(1);       // Wait a bit, but give other threads a chance to run
-    }
- 
-    //// Check whether timestamps were disjoint during the last frame
-    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT tsDisjoint;
-    m_pContext->GetData(pDisjointQuery, &tsDisjoint, sizeof(tsDisjoint), 0);
-    if (tsDisjoint.Disjoint)
-    {
-        return;
-    }
- 
-    // Get all the timestamps
-    UINT64 tsBeginFrame, tsComputeClear; // ... etc.
-    m_pContext->GetData(pBeginFrameQuery, &tsBeginFrame, sizeof(UINT64), 0);
-    m_pContext->GetData(pComputeEventQuery, &tsComputeClear, sizeof(UINT64), 0);
-    // ... etc.
- 
-    //// Convert to real time
-    float msComputeClear = float(tsComputeClear - tsBeginFrame) /
-                           float(tsDisjoint.Frequency) * 1000.0f;
 
-		printf(" TIME COMPUTE KERNEL %d \n", msComputeClear);
-
-	//cout << " TOME COMPUTE " << msComputeClear << endl;
-	//return S_OK;//hr;
-}
 /******************************************************************
 *                                                                 *
 *  DemoApp::MycoComputeFunction                                 *
@@ -1731,17 +1824,18 @@ void DemoApp::CollectTimeStamps()
 
 HRESULT DemoApp::MycoComputeFunction()
 {
-
-	HRESULT hr;
-	
-	 // Begin disjoint query, and timestamp the beginning of the frame
-    m_pContext->Begin(pDisjointQuery);
-    m_pContext->End(pBeginFrameQuery);
+	HRESULT hr = S_OK;
+	D3D11_QUERY_DESC qd;
+	ID3D11Query *pEventQuery=NULL;
 
 	// Null views to unbind
 	ID3D11UnorderedAccessView* no_UAV = 0;
 	ID3D11ShaderResourceView*  no_SRV = 0;
 
+	//Create an event query to sync with GPU
+	qd.Query=D3D11_QUERY_EVENT;
+	qd.MiscFlags=0;
+	m_pDevice->CreateQuery(&qd, &pEventQuery);
 
 	if(GetAsyncKeyState('8') & 0x8000) {mAppPaused=true; } ;
 	if(GetAsyncKeyState('9') & 0x8000) {mAppPaused=false; } ;
@@ -1773,7 +1867,8 @@ HRESULT DemoApp::MycoComputeFunction()
 	m_pContext->CSSetUnorderedAccessViews( 0, 1, &m_pBiomassBuffer0UAV, NULL);
 	//give it read write access to 3D texture
 	m_pContext->CSSetUnorderedAccessViews( 1, 1, &m_p3DTexUAV, NULL);
-
+	//give it read write access to the debug staging buffer
+	m_pContext->CSSetUnorderedAccessViews( 2, 1, &m_DebugProcessesStagingUAV, NULL);
 
 	// run the compute shader with enough groups so that there is a thread for every pixel on the screen
 	m_pContext->Dispatch( uGroupsX, uGroupsY, uGroupsZ); 
@@ -1782,6 +1877,7 @@ HRESULT DemoApp::MycoComputeFunction()
 	// unbind the resources
 	m_pContext->CSSetUnorderedAccessViews( 0, 1, &no_UAV, 0 );
 	m_pContext->CSSetUnorderedAccessViews( 1, 1, &no_UAV, 0 );
+	m_pContext->CSSetUnorderedAccessViews( 2, 1, &no_UAV, 0 );
 	m_pContext->CSSetShaderResources( 0, 1,&no_SRV );
 
 
@@ -1791,18 +1887,11 @@ HRESULT DemoApp::MycoComputeFunction()
 	swap( m_pBiomassBuffer0SRV, m_pBiomassBuffer1SRV );
 	swap( m_pBiomassBuffer0UAV, m_pBiomassBuffer1UAV );
 
-	 m_pContext->End(pComputeEventQuery);
-
-	 //m_pContext->End(pBeginFrameQuery);
-     m_pContext->End(pDisjointQuery);
-
-
-
-	counter++;//
+	counter++;
 	
 	
-	//copy back to host memory every 64th tick
-	if ((counter ==1)||(counter & 0x3f)==0) //0x3f
+	//copy back to host memory every 1000th tick
+	if ((counter ==1)||(counter%100==0)) 
 	{
 		D3D11_MAPPED_SUBRESOURCE MappedResource; 
 		m_pContext->CopyResource(  m_pDebugStagingBuffer, m_pBiomassBuffer1 );
@@ -1810,29 +1899,42 @@ HRESULT DemoApp::MycoComputeFunction()
 
 		if (S_OK == hr)
 		{
-			DebugBufType sum={0};
+			DebugBufTypeD sum={0};
 			DebugBufType *pRaw = reinterpret_cast< DebugBufType* >( MappedResource.pData );
-			//printf(" Debug %f %f %f %f\n", pRaw[505050].state,  pRaw[505050].ins,  pRaw[505050].mb, pRaw[505050].ex_re );//flat[x+ y*WIDTH+ z*WIDTH*DEPTH]=original[x,y,z];
-			//printf(" Debug %f %f %f %f\n", pRaw[1005050].state,  pRaw[1005050].ins,  pRaw[1005050].mb, pRaw[1005050].ex_re );//flat[x+ y*WIDTH+ z*WIDTH*DEPTH]=original[x,y,z];
+			printf(" Debug %g %g %g %g\n", pRaw[500].state,  pRaw[500].ins,  pRaw[500].mb, pRaw[500].ex_re ); //flat[x+ y*WIDTH+ z*WIDTH*DEPTH]=original[x,y,z];
+			//printf(" Debug %f %f %f %f\n", pRaw[1005050].state,  pRaw[1005050].ins,  pRaw[1005050].mb, pRaw[1005050].ex_re ); //flat[x+ y*WIDTH+ z*WIDTH*DEPTH]=original[x,y,z];
 
 			sumDebug(&sum, pRaw, BUFFER_SIZE_X*BUFFER_SIZE_Y*BUFFER_SIZE_Z, counter);
+
+			//here write out 3d scalar field....
 		
 			//printf( "Groups X Y %i %i", uGroupsX , uGroupsY );
 		}
 		m_pContext->Unmap( m_pDebugStagingBuffer, 0 );//
-		printf( "Tick copying GPU data to CPU %i", counter );
-	}
-	 //CollectTimeStamps();
+
+		D3D11_MAPPED_SUBRESOURCE MappedResourceProcesses; 
+		m_pContext->CopyResource(  m_pDebugProcessesStagingBuffer, m_pBuffer );
+		hr= m_pContext->Map(m_pDebugStagingBuffer, 0, D3D11_MAP_READ, 0, &MappedResourceProcesses);    
+		DebugProcessBufType test={0};
+		DebugProcessBufType *pProcRaw = reinterpret_cast< DebugProcessBufType* >( MappedResourceProcesses.pData );
+	
+		//printf(" Uptake:  %f\n", pProcRaw[0].uptake);//flat[x+ y*WIDTH+ z*WIDTH*DEPTH]=original[x,y,z];
+		//printf(" Insul:  %f\n", pProcRaw[0].insul);
+		m_pContext->Unmap( m_pDebugStagingBuffer, 0 );//
+		//printf( "Tick copying GPU data to CPU %i", counter );
+	}//
+	
 	return S_OK;//hr;
 } 
 
+//grab framebuffer and send to image
 void DemoApp::FrameBufferImage(const int tick)
 {
 	ID3D11Texture2D* pSurface;
     HRESULT hr = m_pSwapChain->GetBuffer( 0, __uuidof( ID3D11Texture2D ), reinterpret_cast< void** >( &pSurface ) );
 
 	WCHAR file[256];
-	swprintf(file, 255, L".//image_grabs//test%i.png", tick);	
+	swprintf(file, 255, L".//test%i.png", tick);	
 
     if( ( pSurface )&&(tick % 100 == 0))
 	{
@@ -1897,12 +1999,12 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 	//update scene
 
 	// Update info display based on input 
-	if(GetAsyncKeyState('3') & 0x8000) { m_DisplayInfo.ins=1;m_DisplayInfo.ni=0; m_DisplayInfo.mb=0; printf( "IB scalar field\n" );}
+	/*if(GetAsyncKeyState('3') & 0x8000) { m_DisplayInfo.ins=1;m_DisplayInfo.ni=0; m_DisplayInfo.mb=0; printf( "IB scalar field\n" );}
 	if(GetAsyncKeyState('1') & 0x8000) { m_DisplayInfo.ins=0;m_DisplayInfo.ni=1; m_DisplayInfo.mb=0;printf( "NIB scalar field\n" );}
 	if(GetAsyncKeyState('2') & 0x8000) { m_DisplayInfo.ins=0;m_DisplayInfo.ni=0; m_DisplayInfo.mb=1;printf( "MB scalar field\n" );}
 	if(GetAsyncKeyState('4') & 0x8000) { m_DisplayInfo.ins=1;m_DisplayInfo.ni=1; m_DisplayInfo.mb=1;printf( "MB + NIB + IB scalar fields\n" );}
-	if(GetAsyncKeyState('5') & 0x8000) { m_DisplayInfo.ex_re=1;m_DisplayInfo.ni=0; m_DisplayInfo.mb=0;m_DisplayInfo.ins=0;printf( "external resource fields\n" );}
-	UpdateDisplayInfoCB();
+	if(GetAsyncKeyState('5') & 0x8000) { m_DisplayInfo.ex_re=1;m_DisplayInfo.ni=0; m_DisplayInfo.mb=0;m_DisplayInfo.ins=0;printf( "external resource fields\n" );}*/
+
 	
 
 	if(GetAsyncKeyState('0') & 0x8000) {rot=rot+0.01;}
@@ -1921,7 +2023,6 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 	D3DXMATRIX tmp, tmp2;
 	D3DXMatrixTranspose(&tmp, &m_DisplayInfo.wvp);
 	m_DisplayInfo.wvp=tmp;
-	m_DisplayInfo.geometry=1;
 
 	//D3DXMatrixTranspose(&tmp2, &view);
 	//m_DisplayInfo.wvp=tmp;
@@ -1931,7 +2032,7 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 	ov.y= view(1,2);
 	ov.z= view(2,2);
 	int axis= getPrincipalAxis(ov);
-	printf( "AXIS %u", axis );
+	//printf( "AXIS %u", axis );
 	static int lastAxis= -1;
 	if (lastAxis != axis)
 	{
@@ -1944,8 +2045,6 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 		}
 	}
 
-	UpdateDisplayInfoCB();
-	//UpdateCB();
 
 	// anttweakbar will crash the graphics driver if we do not explicitly set a vertex shader1
 	m_pContext->VSSetShader(m_pVertexShader, NULL, 0);
@@ -1962,9 +2061,9 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 	m_pContext->PSSetShaderResources( 1, 1, &m_p3DTexSRV );  
 	m_pContext->PSSetShaderResources( 2, 1, &m_p3DTexStructSRV );  
 	// blendFactor=D3DXVECTOR4( 0.0f, 0.0f, 0.0f, 0.0f );
-	m_pContext->PSSetSamplers(0,1,&m_SamplerState);
 	m_pContext->OMSetBlendState( m_BlendState, NULL, 0xFFFFFFFF  );
-
+	m_pContext->PSSetSamplers(0,1,&m_SamplerState);
+	
 	//draw bounding geometry
 	m_DisplayInfo.geometry=0;
 	UpdateDisplayInfoCB();
@@ -1973,31 +2072,27 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 	
 	m_DisplayInfo.geometry=1;
 	UpdateDisplayInfoCB();
-
+	
 	// set the GPU to use this vertex buffer, layout, shader, and primitive topology
 	UINT stride = 24;
 	UINT offset = 0;
 	m_pContext->IASetInputLayout( m_pVertexLayout );
 	m_pContext->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP );
-	
-	
-	//drawgeometry=true;
-	//dray proxy gemmetry
+
 	switch(axis){
 		case 0: 
 			if(ov.x > 0.0f)
 			{
 				
-			
 				m_pContext->IASetVertexBuffers(0, 1, &m_pVertexBufferXNeg, &stride, &offset );
 				m_pContext->Draw( MAX_PROXY_VERTS, 0 );//DrawSliceStack_NegativeZ();
-							printf("NEG X");
+							//printf("NEG X");
 			}
 			else
 			{
 				m_pContext->IASetVertexBuffers( 0, 1, &m_pVertexBufferXPos, &stride, &offset );
 				m_pContext->Draw( MAX_PROXY_VERTS, 0 );//DrawSliceStack_NegativeZ();
-				printf("POS X");
+				//printf("POS X");
 			}
 			break;
 	
@@ -2007,13 +2102,13 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 				m_pContext->IASetVertexBuffers( 0, 1, &m_pVertexBufferZNeg, &stride, &offset );
 				m_pContext->Draw( MAX_PROXY_VERTS, 0 );//DrawSliceStack_NegativeZ();
 
-					printf("NEG Z");
+					//printf("NEG Z");
 			}
 			else
 			{
 				m_pContext->IASetVertexBuffers( 0, 1, &m_pVertexBuffer, &stride, &offset );
 				m_pContext->Draw( MAX_PROXY_VERTS, 0 );//DrawSliceStack_NegativeZ();
-					printf("POS Z");
+					//printf("POS Z");
 				
 			}
 			break;
@@ -2023,7 +2118,7 @@ HRESULT DemoApp::MycoDrawFunction(const int tick)
 	// Draw tweakbar
 	TwDraw();
 
-	FrameBufferImage(tick);
+	//FrameBufferImage(tick);
 
 	// unbind the pixel shader resources
 	ID3D11ShaderResourceView* aSRViewsNULL[ 1 ] = { NULL };
@@ -2232,7 +2327,7 @@ HRESULT DemoApp::MessageLoop()
 		}
 		else
 		{
-			if(counter < 100000)
+			if(counter <1681 )//16801
 			{
 			mTimer.tick();
 			updateScene(mTimer.getDeltaTime());
@@ -2254,6 +2349,7 @@ HRESULT DemoApp::MessageLoop()
 				{
 					DrawFunction(counter);
 				    //printf( "Tick draw %u %u", counter ,counter );
+					//printf( "TIme elapsed %g", mTimer.getGameTime()  ); 
 				}
 			}
 			}
@@ -2262,6 +2358,12 @@ HRESULT DemoApp::MessageLoop()
 				
 
 				printf( "TIme elapsed %g", mTimer.getGameTime()  ); 
+	
+		MatLab.open("SV.txt",ios::out|ios::app);
+
+		MatLab << setiosflags( ios::fixed)<< setprecision(10)<< mTimer.getGameTime()  <<endl;	
+		//printf("PRINTING output file");
+		MatLab.close();
 				msg.message = WM_QUIT;
 			}
 		

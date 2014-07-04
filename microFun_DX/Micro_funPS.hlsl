@@ -55,7 +55,7 @@ float4 Micro_funPS( PS_INPUT inPix ) : SV_Target
 #else
 	if(geometry)
 	{
-	// calculate the buffer index corresponding to this scuireen coordinate
+	// calculate the buffer index corresponding to this screen coordinate
     uint idx = (inPix.Pos.x-.5)+(inPix.Pos.y-.5)*BUFFER_SIZE_X+(inPix.Pos.z-.5)*BUFFER_SIZE_Y*BUFFER_SIZE_Z;  
 	//const float4 bias=	float4(-0.5, -0.5, -0.5, 0);
 	//const float4 stride=float4(1, BUFFER_SIZE_X, BUFFER_SIZE_X*BUFFER_SIZE_Y, 0);
@@ -71,7 +71,7 @@ float4 Micro_funPS( PS_INPUT inPix ) : SV_Target
 	temp_structure = 1.0;
 	
     //max-min biomass values
-	float normW= 1.0/(s.r+s.g+s.b);//
+	float normW= 1.0/(s.r+s.g+s.b);
 
 		// [branch]
 	if ((s.r+s.g+s.b) > 0.0)

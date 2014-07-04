@@ -24,6 +24,6 @@
 #define GROUPS_Y  ((BUFFER_SIZE_Y-1)/(THREADS_Y-2)+1)
 #define GROUPS_Z  ((BUFFER_SIZE_Z-1)/(THREADS_Z-2)+1)
 
-typedef float scalar;
+typedef double scalar;
 
 #endif

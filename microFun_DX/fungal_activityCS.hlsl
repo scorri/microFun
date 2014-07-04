@@ -12,18 +12,25 @@
 //numerical parameter for diffusion and other processes
 #define timek 0.0020833
 //fungal genotype parameters
-#define insul 0.005 //0.005//0.000005 0.005000  
-#define betan 0.2
-#define alphan 0.8
+#define insul 0 
+#define betan 0.05
+#define alphan 0.95
 #define rho 1.2 //less than 1 for recycling
 #define omega 100
-#define replenishment 0.0
-//#define timek 1.0
+#define replenishment 0
 #define h 0.05
 #define kDoc 0.0000001
 #define vDoc 5
-#define uptake_trait 0 //check this
+#define uptake_trait 1.0 //check this
 
+
+struct DebugProcessBufType
+{
+	scalar totUptk;
+	scalar totIns;
+	scalar totMobN;
+	scalar totMobI;
+};
 
 // definition of the Biomass cell buffer element
 struct BiomassBufType
@@ -58,7 +65,8 @@ cbuffer CB0
 	float Dv;
     //diffussion coefficient of internal resource 
 	float theta;
-  };
+    // immobilisation term
+};
 
 // a read-only view of the first biomass buffer resource
 StructuredBuffer<BiomassBufType> BiomassBufferOld : register (t0);
@@ -70,6 +78,10 @@ Texture3D<uint> soil_struct : register (t1);
 RWStructuredBuffer<BiomassBufType> BiomassBufferNew: register (u0);
 //3D texture - without this specifier a memory barrier or sync will flush the UAV only within the current group
 globallycoherent RWTexture3D<float4> gOutputTex: register (u1); 
+// a read-write view of the  biomass buffer resource
+RWStructuredBuffer<DebugProcessBufType> Processes: register (u2); //u2 specifies the slot it is bound to?
+//create a read only vie of the debug processing buffer
+//RWStructuredBuffer<DebugProcessBufType> Processes; 
 
 //--------------------------------------------------------------------------------------
 // threadOnSealingPlanes
@@ -224,8 +236,9 @@ SharedInfo getAdjacentCellSum( uint GI)
 void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint GI : SV_GroupIndex )
 {
 
-	float alphai=0.006000;//alphan/omega;
-	float betai=0.004800 ;//betan*rho*alphai/alphan;
+
+	float alphai=alphan/omega;
+	float betai=betan*rho*alphai/alphan;
 
 	//a temp to store biomass data in to transfer to 3D texture for opixel shader so we can do filtering etc...
 	float4 biomass;
@@ -268,9 +281,7 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
     sharedState[GI].mb = BiomassBufferOld[ idx ].mb;
 	sharedState[GI].structure = temp_structure;
 
-
 	
-
     // wait until all threads in this group reach this point to ensure that sharedState contains accurate data
 	GroupMemoryBarrierWithGroupSync();
 
@@ -296,8 +307,8 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 
         // STRUCTURE CONSTRAINED DIFFUSION _____  diffuse NI -  diffusion algorithm from GPU gems 2 chapter
 		// diffuse ni biomass -  diffusion algorithm from GPU gems 2 chapter
-		scalar coeff = 1-((timek*sum.structure*Db)/(float)(h*h));
-        nextStateNI = state.ni * coeff + (timek/(float)(h*h))*state.structure*Db * sum.ni;
+		scalar coeff =( 1-(timek*sum.structure*Db)/(h*h) );
+        nextStateNI = state.ni * coeff + (timek/(h*h))*state.structure*Db*sum.ni;
 
 		 
 		
@@ -334,33 +345,36 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 
         //assuming a replenished env based on parameter replenishment unit per computational timestep
 		scalar current_re=BiomassBufferNew[ idx ].ex_re;
-        BiomassBufferNew[ idx ].ex_re = replenishment*(1.0-current_re)+current_re;
+        BiomassBufferNew[ idx ].ex_re = replenishment*(265.2500e-06*1000000-current_re)+current_re;
 		
 		////////////////////////////////////////////////////////////////////UPTAKE//////////////////////////////////////////////////////////////////////
 		// Request
 		scalar request=0.0;
-		scalar max=137.5E-06*100000;
+		scalar max=137.5E-06*1000000;
 		scalar tb=BiomassBufferNew[ idx ].ni+BiomassBufferNew[ idx ].ins;
 		scalar ratio =(float)(max-tb)/(float)max;
 
-		request += timek*0*BiomassBufferNew[ idx ].ex_re*BiomassBufferNew[ idx ].ins*ratio;
+		request += timek*0.0*BiomassBufferNew[ idx ].ex_re*BiomassBufferNew[ idx ].ins*ratio;
 
 		if(BiomassBufferNew[ idx ].ex_re>0)
-		request += timek*(vDoc/(float)(kDoc+BiomassBufferNew[ idx ].ex_re))*BiomassBufferNew[ idx ].ex_re*BiomassBufferNew[ idx ].ni*ratio;
-		
+		request += timek*( vDoc/(float)(kDoc+BiomassBufferNew[ idx ].ex_re))*BiomassBufferNew[ idx ].ex_re*BiomassBufferNew[ idx ].ni*ratio;
+
 		//request += timek*(ldan+vDOC/(kDOC+DOC_vxl))*DOC_vxl*nonInsBio_vxl*ratio;
 		 dtUptk = request;
+				 
 
 		//check the requested uptake can be satisfied
         if(BiomassBufferNew[ idx ].ex_re<dtUptk)
 		{
             dtUptk=BiomassBufferNew[ idx ].ex_re;
-        }
+        } 
+		Processes[0].totUptk=100;//+=dtUptk;
 		////////////////////////////////////////////////////////////////////INSULATION//////////////////////////////////////////////////////////////////////	
         if((BiomassBufferNew[ idx ].ni>0))//&&(insul>0))
 		{
             dtInsul = timek*insul*BiomassBufferNew[ idx ].ni;
         }
+		
 		////////////////////////////////////////////////////////////////////RECYCLING//////////////////////////////////////////////////////////////////////
 		 if((BiomassBufferNew[ idx ].ni>0)||(BiomassBufferNew[ idx ].ins>0))
 		 {
@@ -371,15 +385,16 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 			/////////////////// MODIFICATIONS ///////////////////////////
 			
 			// upLimMobN_coef+upLimMobI_coef+lowLimTotMob_coef <= 1
-			double upLimMobN_coef=0.0;
-			double upLimMobI_coef=0.0;
-			double lowLimTotMob_coef=0.0;
+			scalar upLimMobN_coef=0.05;
+			scalar upLimMobI_coef=0.05;
+			scalar lowLimTotMob_coef=0.05;
  
-            float upLimMobN = BiomassBufferNew[ idx ].ni - dtInsul - upLimMobN_coef*totBioAvail;
-            float upLimMobI = BiomassBufferNew[ idx ].ins + dtInsul - upLimMobI_coef*totBioAvail;
-            float lowLimTotMob = -BiomassBufferNew[ idx ].mb - dtUptk + lowLimTotMob_coef*totBioAvail;
+            scalar upLimMobN = BiomassBufferNew[ idx ].ni - dtInsul - upLimMobN_coef*totBioAvail;
+            scalar upLimMobI = BiomassBufferNew[ idx ].ins + dtInsul - upLimMobI_coef*totBioAvail;
+            scalar lowLimTotMob = -BiomassBufferNew[ idx ].mb - dtUptk + lowLimTotMob_coef*totBioAvail;
             // pi_ratio is, in fact, the 'internal ressource concentration'
 			float inverse, pi_ratio;
+			
 			if(BiomassBufferNew[ idx ].ni+BiomassBufferNew[ idx ].ins>0)
 			{
 			 inverse=1.0/(float)(BiomassBufferNew[ idx ].ni+BiomassBufferNew[ idx ].ins);
@@ -395,7 +410,7 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
                 dtNetMobI = timek*BiomassBufferNew[ idx ].ins*pi_ratio * (betai-pi_ratio*pi_ratio*alphai);
                 dtNetMobN = timek*BiomassBufferNew[ idx ].ni*pi_ratio * (betan-pi_ratio*pi_ratio*alphan);
             }
-			if (theta==2)
+				if (theta==2)
 			{
                 dtNetMobI = timek*BiomassBufferNew[ idx ].ins*pi_ratio * (betai-pi_ratio*alphai);
                 dtNetMobN = timek*BiomassBufferNew[ idx ].ni*pi_ratio * (betan-pi_ratio*alphan);
@@ -404,7 +419,7 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 			dtTotMob = dtNetMobI+dtNetMobN;
 
 				 if(dtTotMob<lowLimTotMob || dtNetMobN>upLimMobN || dtNetMobI>upLimMobI)
-				{
+				 {
 					if(dtNetMobN>upLimMobN)
 					{
 						if(dtNetMobI>upLimMobI) {dtNetMobI=upLimMobI; /*excess_mobI++;*/}
@@ -427,8 +442,11 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 						//excess_immob++;
 					}
 				}
-			     
-		}   
+				 Processes[0].totMobN= 10000.0;//+=dtNetMobN;
+			     Processes[0].totMobI=666.66;//+=dtNetMobI;
+					
+			  //   
+		}  
 
 	////////////////////////////////////////////////////////////////////BUFFER UPDATE//////////////////////////////////////////////////////////////////////
 		BiomassBufferNew[ idx ].ins = BiomassBufferNew[ idx ].ins + dtInsul- dtNetMobI;
@@ -440,15 +458,15 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 		BiomassBufferNew[ idx ].ex_re =BiomassBufferNew[ idx ].ex_re - dtUptk;
 		biomass.a=BiomassBufferNew[ idx ].ex_re ;
 
+		
 
-		//pass contents of unstructured buffer into texture?
+		//pass contents of unstructured buffer into 3D texture for rendering
 		uint3 cellID = threadIDToCell(DTid, Gid );
 		 uint3 output;
 		output.x = Gid.x*DTid.x;
 		output.y = DTid.y*Gid.y ;
 		output.z = DTid.z*Gid.z;
-
-	
+			
  		int s= soil_struct.Load(sampleCoords);
 		float4 test;
 		if(s==0)
@@ -458,7 +476,7 @@ void ActivityCS( uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3
 		test=float4(1, 1, 1, 0.003);
 		}
 		
-		gOutputTex[cellID].rgba = biomass.rgba;//test.rgba;			
+		gOutputTex[cellID].rgba = biomass.rgba;			
 	
 	}//end if threadinwindow
 }
