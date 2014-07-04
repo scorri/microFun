@@ -62,8 +62,10 @@ GLuint tex = 0;
 //
 cl_kernel kernel;
 cl_kernel tex_kernel;
+cl_kernel sum_kernel;
 cl_mem rd_in;
 cl_mem rd_out;
+cl_mem rd_results;
 cl_mem cl_tex_mem;
 cl_context context;
 cl_command_queue commandQueue;
@@ -116,6 +118,100 @@ float computeStats(float ms)
 	return numberoperations;
 }
 
+cl_int checkSum(cl_mem rd_gpu, const int w, const int h)
+{
+	cl_int errNum;
+	float2* rd_cpu = new float2[w*h];
+
+	// read gpu buffer into cpu memory
+	errNum = clEnqueueReadBuffer(
+		commandQueue, 
+		rd_gpu, 
+		CL_TRUE, 
+		0, 
+		sizeof(float2)*w*h, 
+		rd_cpu, 
+		0, 
+		NULL, 
+		NULL);
+	if(errNum != CL_SUCCESS)
+	{
+		std::cerr << errNum << std::endl;
+		std::cerr << "Error reading buffer" << std::endl;
+	}
+
+	// Calculate sum
+	float2 sum;
+	sum.x = 0.0f;
+	sum.y = 0.0f;
+	for(int x = 0; x < w; x++)
+	{
+		for(int y = 0; y < h; y++)
+		{
+			sum.x += rd_cpu[x+y*w].x;
+			sum.y += rd_cpu[x+y*w].y;
+		}
+	}
+
+	// output result
+	std::cout << "Sum of U component : " << sum.x << std::endl;
+	std::cout << "Sum of V component : " << sum.y << std::endl;
+	
+	delete [] rd_cpu;
+
+	return errNum;
+}
+
+float completeEvent(cl_event ev, cl_command_queue cq)
+{
+	cl_int errNum;
+
+	cl_ulong ev_start_time = (cl_ulong)0;
+	cl_ulong ev_end_time = (cl_ulong)0;
+	
+	clFinish(cq);
+	errNum = clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_QUEUED, 				
+		sizeof(cl_ulong), &ev_start_time, NULL);
+	errNum |= clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_END, 					
+		sizeof(cl_ulong), &ev_end_time, NULL);
+	if(errNum != CL_SUCCESS)
+		std::cout << "Error profiling event : " << errNum << std::endl;
+
+	float ms = (float)((ev_end_time - ev_start_time)*1.0e-6);
+
+	return ms;
+}
+
+cl_int computeSum()
+{
+	cl_int errNum;
+	
+    errNum = clSetKernelArg(sum_kernel, 0, sizeof(cl_mem), &rd_out);
+    errNum |= clSetKernelArg(sum_kernel, 1, sizeof(float2) * ThreadsX * ThreadsY, NULL);
+	errNum |= clSetKernelArg(sum_kernel, 2, sizeof(cl_mem), &rd_results);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting kernel arguments." << std::endl;
+    }
+
+    size_t localWorkSize[1] = { ThreadsX*ThreadsY } ;
+    size_t globalWorkSize[1] =  {  width*height/2 };
+
+	cl_event prof_event;
+    errNum = clEnqueueNDRangeKernel(commandQueue, sum_kernel, 1, NULL,
+                                    globalWorkSize, localWorkSize,
+                                    0, NULL, &prof_event);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error queuing conway kernel for execution." << std::endl;
+    }
+	std::cout << "Time to find partial sums : " << completeEvent(prof_event, commandQueue) << " ms\n";
+
+	checkSum(rd_results, width/ThreadsX, height/ThreadsY/2);
+    return 0;
+}
 
 ///
 // Main rendering call for the scene
@@ -125,7 +221,19 @@ void renderScene(void)
 	static int i = 0;
 	computeVBO();
 	computeTexture();
-	
+
+	if(data_out)
+	{
+		// rd_out is to be rendered so it is output
+		std::cout << "Output UV data" << std::endl;
+		std::cout << "CPU" << std::endl;
+		checkSum(rd_out, width, height);
+		std::cout << "GPU" << std::endl;
+		computeSum();
+		std::cout << std::endl;
+		data_out = false;
+	}
+
 	glClearColor(0.0f, 0.0f, 1.0f, 1.0f );
 	glClear( GL_COLOR_BUFFER_BIT );
 
@@ -133,11 +241,7 @@ void renderScene(void)
 	glutSwapBuffers();	
 	std::swap(rd_in, rd_out);
 
-	if(data_out)
-	{
-		data_out = false;
-	}
-
+/*
 	i++;
 	if(i > iterations)
 	{
@@ -175,6 +279,7 @@ void renderScene(void)
 
 		system("pause");
 	}
+*/
 }
 
 ///
@@ -258,30 +363,6 @@ size_t RoundUp(int groupSize, int globalSize)
     }
 }
 
-void completeEvent(cl_event ev, cl_command_queue cq, const char* message, bool stats)
-{
-	cl_int errNum;
-
-	cl_ulong ev_start_time = (cl_ulong)0;
-	cl_ulong ev_end_time = (cl_ulong)0;
-	
-	clFinish(cq);
-	errNum = clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_QUEUED, 				
-		sizeof(cl_ulong), &ev_start_time, NULL);
-	errNum |= clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_END, 					
-		sizeof(cl_ulong), &ev_end_time, NULL);
-	if(errNum != CL_SUCCESS)
-		std::cout << "Error profiling event : " << errNum << std::endl;
-
-	float ms = (float)((ev_end_time - ev_start_time)*1.0e-6);
-	if(stats)
-	{
-		results.push_back(ms);
-	}
-	else
-		std::cout << "Profile : " << message << " : " << ms << " ms\n";
-}
-
 cl_int computeVBO()
 {
 	cl_int errNum;
@@ -317,7 +398,7 @@ cl_int computeVBO()
         std::cerr << "Error queuing conway kernel for execution." << std::endl;
     }
 
-	completeEvent(prof_event, commandQueue, "running kernel", true);
+	results.push_back( completeEvent(prof_event, commandQueue) );
 
     return 0;
 }
@@ -331,7 +412,7 @@ cl_int computeTexture()
 	cl_int errNum;
 
     errNum = clSetKernelArg(tex_kernel, 0, sizeof(cl_mem), &cl_tex_mem);
-	errNum = clSetKernelArg(tex_kernel, 1, sizeof(cl_mem), &rd_in);
+	errNum = clSetKernelArg(tex_kernel, 1, sizeof(cl_mem), &rd_out);
 
 	// define work groups
 	size_t localWorkSize[2] = { ThreadsX, ThreadsY } ;               
@@ -388,11 +469,17 @@ void Cleanup()
 		if( tex_kernel != 0 ) 
                 clReleaseKernel(tex_kernel);
 
+		if( sum_kernel != 0 ) 
+                clReleaseKernel(sum_kernel);
+
         if( rd_in != 0 )
                 clReleaseMemObject(rd_in);
 
 		if( rd_out != 0 )
                 clReleaseMemObject(rd_out);
+
+		if( rd_results != 0 )
+                clReleaseMemObject(rd_results);
 
 		if( cl_tex_mem != 0 )
                 clReleaseMemObject(cl_tex_mem);
@@ -403,7 +490,8 @@ void Cleanup()
 				glBindBuffer(GL_TEXTURE_RECTANGLE_ARB, tex );
 				glDeleteBuffers(1, &tex);
 		}
-system("pause");
+		
+		system("pause");
 	exit(0);
 }
 
@@ -639,7 +727,25 @@ void CreateIOResources()
             pGSBuffer[k].y += rRand * pGSBuffer[k].y;
         }
     }
+/*
+	// output initial sum to check
+	float2 sum;
+	sum.x = 0.0;
+	sum.y = 0.0;
+	for(int x =0; x<width; x++)
+	{
+		for(int y = 0; y < height; y++)
+		{
+			sum.x += pGSBuffer[x+y*width].x;
+			sum.y += pGSBuffer[x+y*width].y;
+		}
+	}
 
+	// output result
+	std::cout << "created initial buffer with sum.." << std::endl;
+	std::cout << "Sum of U component : " << sum.x << std::endl;
+	std::cout << "Sum of V component : " << sum.y << std::endl;
+*/
 		// create cl buffers
 	rd_in = clCreateBuffer(
 		context,
@@ -647,15 +753,36 @@ void CreateIOResources()
 		sizeof(float2)*width*height,
 		pGSBuffer,
 		&errNum);
-	
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating rd input buffer." << std::endl;
+	}
+
 	rd_out = clCreateBuffer(
 		context,
 		CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
 		sizeof(float2)*width*height,
 		pGSBuffer,
 		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating rd output buffer" << std::endl;
+	}
 
     delete [] pGSBuffer;
+
+	// create buffer to store preliminary sum results
+	// each work group will produce one results value
+	rd_results = clCreateBuffer(
+		context,
+		CL_MEM_READ_WRITE,
+		sizeof(float2)*(width/ThreadsX)*(height/ThreadsY),
+		NULL,
+		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating results buffer" << std::endl;
+	}
 
 	// create image
 	cl_tex_mem = clCreateFromGLTexture2D(
@@ -754,7 +881,7 @@ int main(int argc, char** argv)
     kernel = clCreateKernel(program, "gs_rd_kernel", NULL);
     if (kernel == NULL)
     {
-        std::cerr << "Failed to create output kernel" << std::endl;
+        std::cerr << "Failed to create rd kernel" << std::endl;
         Cleanup();
         return 1;
     }
@@ -769,10 +896,23 @@ int main(int argc, char** argv)
     tex_kernel = clCreateKernel(program, "output_kernel", NULL);
     if (tex_kernel == NULL)
     {
-        std::cerr << "Failed to create conway kernel" << std::endl;
+        std::cerr << "Failed to create output kernel" << std::endl;
         Cleanup();
         return 1;
     }
+
+	// Create OpenCL kernel
+    sum_kernel = clCreateKernel(program, "sum_kernel", NULL);
+    if (sum_kernel == NULL)
+    {
+        std::cerr << "Failed to create sum kernel" << std::endl;
+        Cleanup();
+        return 1;
+    }
+
+	// check initial sum
+	//std::cout << "checking initial sum value against initial sum" << std::endl;
+	//checkSum(rd_in, width, height);
 
 		printf("CL resources created. Entering main loop... \n");
         glutMainLoop();

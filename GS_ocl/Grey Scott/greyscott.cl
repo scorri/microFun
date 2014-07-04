@@ -105,3 +105,50 @@ __kernel void output_kernel(__write_only image2d_t im,
 	//write_imagef(im, (int2)(x, y), (float4)(0.1f,(float)(1 - rd_buff[idx].x),0.0f, 1.0f)); // 1D
 
 }
+
+// unroll
+void warpReduce(__local volatile float2* s_data, int tid)
+{
+	s_data[tid] += s_data[tid+32];
+	s_data[tid] += s_data[tid+16];
+	s_data[tid] += s_data[tid+ 8];
+	s_data[tid] += s_data[tid+ 4];
+	s_data[tid] += s_data[tid+ 2];
+	s_data[tid] += s_data[tid+ 1];	
+}
+
+// half gws
+// unroll last warp
+__kernel void sum_kernel(__global float2 *rd_in,
+							__local float2 *s_data,
+							__global float2 *sum_partial)
+{
+	unsigned int lid = get_local_id(0);
+
+	unsigned int gid = get_group_id(0)*(get_local_size(0)*2) + lid;
+
+	// store global value into local shared memory address
+	s_data[lid] = rd_in[gid] + rd_in[gid + get_local_size(0)];
+
+	barrier(CLK_LOCAL_MEM_FENCE); /* Wait for others in the work-group */
+
+	// do reduction to find sum of work group
+	for(unsigned int s = get_local_size(0)/2; s > 32; s >>= 1)
+	{
+		if(lid < s)
+		{
+			s_data[lid] += s_data[lid + s];
+		}
+
+		barrier(CLK_LOCAL_MEM_FENCE); /* Wait for others in the work-group */	
+	}
+
+	// unroll last warp
+	if(lid < 32) warpReduce(s_data, lid);
+
+	// write partial result for this work group
+	if(lid == 0)
+	{
+		sum_partial[get_group_id(0)] = s_data[0];
+	}
+}
