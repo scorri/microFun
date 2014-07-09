@@ -11,10 +11,16 @@ microFun_DX/Release/
 microFun_DX/ipch/
 microFun_DX/image_grabs/
 
+#ignore sum_reduction folders
+sum_reduction_ocl/Debug/
+sum_reduction_ocl/ipch
+sum_reduction_ocl/Release
+sum_reduction_ocl/Grey\ Scott/Debug
+sum_reduction_ocl/Grey\ Scott/Release
+
 # ignore file types
 *.opensdf
 *.sdf
 *.sln
 *.suo
 *.vcxpro*
-
