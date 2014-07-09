@@ -39,10 +39,21 @@
 
 const int width = 512;
 const int height = 512;
+
 const int ThreadsX = 16;
 const int ThreadsY = 16;
 
 const int iterations = 100;
+
+// view params
+int ox, oy;
+int buttonState = 0;
+float camera_trans[] = {0, 0, -3};
+float camera_rot[]   = {0, 0, 0};
+float camera_trans_lag[] = {0, 0, -3};
+float camera_rot_lag[] = {0, 0, 0};
+const float inertia = 0.1f;
+float modelView[16];
 
 std::vector<float> results;
 
@@ -89,25 +100,25 @@ void displayTexture(int w, int h)
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex );
         glBegin(GL_QUADS);
                 glTexCoord2f(0, 0);
-                glVertex2f(0, 0);
+                glVertex2f(-1, -1);
                 glTexCoord2f(0, h);
-                glVertex2f(0, h);
+                glVertex2f(-1, 1);
                 glTexCoord2f(w, h);
-                glVertex2f(w, h);
+                glVertex2f(1, 1);
                 glTexCoord2f(w, 0);
-                glVertex2f(w, 0);
+                glVertex2f(1, -1);
         glEnd();
         glDisable(GL_TEXTURE_RECTANGLE_ARB);
 }
 
-void reshape(int width, int height) 
+void reshape(int w, int h) 
 {
-        glViewport( 0, 0, width, height );
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        gluOrtho2D(0,width,height,0);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(60.0, (float) w / (float) h, 0.1, 100.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glViewport(0, 0, w, h);
 }
 
 float computeStats(float ms)
@@ -218,10 +229,10 @@ cl_int computeSum()
 //
 void renderScene(void)
 {
-	static int i = 0;
 	computeVBO();
 	computeTexture();
 
+	// output U and V summed values
 	if(data_out)
 	{
 		// rd_out is to be rendered so it is output
@@ -235,51 +246,32 @@ void renderScene(void)
 	}
 
 	glClearColor(0.0f, 0.0f, 1.0f, 1.0f );
-	glClear( GL_COLOR_BUFFER_BIT );
+	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	displayTexture(width,height);
+	// view transform
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+
+    for (int c = 0; c < 3; ++c)
+    {
+        camera_trans_lag[c] += (camera_trans[c] - camera_trans_lag[c]) * inertia;
+        camera_rot_lag[c] += (camera_rot[c] - camera_rot_lag[c]) * inertia;
+    }
+
+    glTranslatef(camera_trans_lag[0], camera_trans_lag[1], camera_trans_lag[2]);
+    glRotatef(camera_rot_lag[0], 1.0, 0.0, 0.0);
+    glRotatef(camera_rot_lag[1], 0.0, 1.0, 0.0);
+
+    glGetFloatv(GL_MODELVIEW_MATRIX, modelView);
+
+    // render simulation area
+    glColor3f(1.0, 1.0, 1.0);
+    glutWireCube(2.0);
+
+	// render simulation data
+	displayTexture(width, height);
 	glutSwapBuffers();	
 	std::swap(rd_in, rd_out);
-
-/*
-	i++;
-	if(i > iterations)
-	{
-		i = 0;
-
-		// Output Results
-		// Median	
-		std::sort( results.begin(), results.end());
-		double med = 0.0;
-		if(results.size()/2 == 0)
-			med = results[ results.size()/2 ];
-		else
-		{
-			med = (results[ results.size()/2 ] + results[ results.size()/2 - 1])/2.0; 
-		}
-		printf("\nMedian: %.2f ms\n", med);
-		//printf("\t %.2f Mop/s\n", computeStats(med));
-
-		// Mean
-		double sum = std::accumulate(std::begin(results), std::end(results), 0.0);
-		double m =  sum / results.size();
-		printf("Mean: %.2f ms\n", m);
-		//printf("\t %.2f Mop/s\n", computeStats(m));
-
-		// Standard deviation
-		double accum = 0.0;
-		std::for_each (std::begin(results), std::end(results), [&](const double d) {
-			accum += (d - m) * (d - m);
-		});
-		double stdev = sqrt(accum / (results.size()-1));
-		printf("Standard Deviation: %.2f\n", stdev);
-
-		printf("1. %.2f %d. %.2f\n", results[0], results.size()-1, results[results.size()-1]);
-		results.clear();
-
-		system("pause");
-	}
-*/
 }
 
 ///
@@ -302,11 +294,67 @@ void KeyboardGL(unsigned char key, int x, int y)
     }
 }
 
+void MousePressGL(int button, int state, int x, int y)
+{
+	int mods;
+
+	if (state == GLUT_DOWN)
+    {
+        buttonState |= 1<<button;
+    }
+    else if (state == GLUT_UP)
+    {
+        buttonState = 0;
+    }	
+
+    mods = glutGetModifiers();
+
+    if (mods & GLUT_ACTIVE_SHIFT)
+    {
+        buttonState = 2;
+    }
+    else if (mods & GLUT_ACTIVE_CTRL)
+    {
+        buttonState = 3;
+    }
+
+    ox = x;
+    oy = y;
+}
+
+void MouseMotionGL(int x, int y)
+{
+    float dx, dy;
+    dx = (float)(x - ox);
+    dy = (float)(y - oy);
+
+	if (buttonState == 3)
+	{
+	    // left+middle = zoom
+	    camera_trans[2] += (dy / 100.0f) * 0.5f * fabs(camera_trans[2]);
+	}
+	else if (buttonState & 2)
+	{
+	    // middle = translate
+	    camera_trans[0] += dx / 100.0f;
+	    camera_trans[1] -= dy / 100.0f;
+	}
+	else if (buttonState & 1)
+	{
+	    // left = rotate
+	    camera_rot[0] += dy / 5.0f;
+	    camera_rot[1] += dx / 5.0f;
+	}
+
+    ox = x;
+    oy = y;
+
+}
 void initGlut(int argc, char *argv[], int wWidth, int wHeight)
 {
     glutInit(&argc, argv);
-    //glutInitDisplayMode(GLUT_DEPTH | GLUT_DOUBLE | GLUT_RGBA);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA);
+    glutInitDisplayMode(GLUT_DEPTH | GLUT_DOUBLE | GLUT_RGBA);
+    //glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA);
     glutInitWindowPosition(100,100);
     glutInitWindowSize(wWidth, wHeight);
     glutCreateWindow("Grey Scott");
@@ -314,6 +362,8 @@ void initGlut(int argc, char *argv[], int wWidth, int wHeight)
     glutDisplayFunc(renderScene);
     glutIdleFunc(renderScene);
     glutReshapeFunc(reshape);
+	glutMouseFunc(MousePressGL);
+	glutMotionFunc(MouseMotionGL);
     glutKeyboardFunc(KeyboardGL);
         
     glewInit();
@@ -335,6 +385,8 @@ void initGlut(int argc, char *argv[], int wWidth, int wHeight)
 	strVersion = 0;
 
 	wglSwapIntervalEXT(false); //disable vsync for faster rendering
+	glEnable(GL_DEPTH_TEST);
+	glutReportErrors();
 }
 
 void initTexture( int width, int height )
@@ -491,7 +543,7 @@ void Cleanup()
 				glDeleteBuffers(1, &tex);
 		}
 		
-		system("pause");
+//		system("pause");
 	exit(0);
 }
 
@@ -773,10 +825,11 @@ void CreateIOResources()
 
 	// create buffer to store preliminary sum results
 	// each work group will produce one results value
+	// (divide by 2 as the kernel performs first add during load)
 	rd_results = clCreateBuffer(
 		context,
 		CL_MEM_READ_WRITE,
-		sizeof(float2)*(width/ThreadsX)*(height/ThreadsY),
+		sizeof(float2)*(width/ThreadsX)*(height/ThreadsY)/2,
 		NULL,
 		&errNum);
 	if( errNum != CL_SUCCESS )
