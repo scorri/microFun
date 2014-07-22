@@ -1,7 +1,7 @@
 // output kernel queue sizes
-#define BUFFER_SIZE_X 128
-#define BUFFER_SIZE_Y 128
-#define BUFFER_SIZE_Z 64
+#define BUFFER_SIZE_X 200
+#define BUFFER_SIZE_Y 200
+#define BUFFER_SIZE_Z 200
 
 // for determining results buffer sizes
 #define THREAD_X 8
@@ -44,7 +44,14 @@ struct int4
 	}
 };
 
-
+typedef float scalar;
+struct BioBufType
+{
+	scalar state;
+	scalar mb;
+	scalar ins;
+	scalar ex_re;
+};
 
 #include <iostream>
 #include <fstream>
@@ -78,6 +85,7 @@ struct int4
 
 bool v_sync = false;
 bool data_out = false;
+long long int sim_start;
 
 //GLuint tex = 0;
 GLuint m_vbo = 0;
@@ -103,14 +111,40 @@ float modelView[16];
 cl_kernel kernel;
 cl_kernel rd_kernel;
 cl_kernel sum_kernel;
+cl_kernel new_kernel;
 cl_mem rd_in;
 cl_mem rd_out;
+cl_mem bio_in;
+cl_mem bio_out;
 cl_mem rd_results;
 cl_mem cl_colour;
 cl_context context;
 cl_command_queue commandQueue;
 cl_program program;
 
+//microFun resources
+typedef struct 
+{
+    unsigned char	b[BUFFER_SIZE_X][BUFFER_SIZE_Y][BUFFER_SIZE_Z];
+} ByteArray;
+
+scalar carbonMap[BUFFER_SIZE_X][BUFFER_SIZE_Y][BUFFER_SIZE_Z]={0.0};
+ByteArray gByteArray={0,};
+typedef struct
+{
+	unsigned char min, max;
+} ByteInterval;
+
+static const ByteInterval ivlTable[]=
+{ 
+	{0,0},		// empty
+	{1, 1},		// first fungus
+	{2, 2},		// second fungus
+	{3, 3},		// both fungi (overlap)
+	{255, 255}	// solid
+};
+
+// forward declarations
 cl_int compute_rd();
 cl_int compute_output();
 cl_int compute_sum();
@@ -248,8 +282,9 @@ void renderScene(void)
 	// output U and V summed values
 	if(data_out)
 	{
+		long long int sim_end = get_time();
 		// rd_out is to be rendered so it is output
-		std::cout << "Output UV data" << std::endl;
+		std::cout << "Output UV data at " << (sim_end - sim_start)/1000 << " s into simulation" << std::endl;
 		std::cout << "CPU" << std::endl;
 		checkSum(rd_out, BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z);
 		std::cout << "GPU" << std::endl;
@@ -626,7 +661,8 @@ void reset_rd(int rdWidth, int rdHeight, int rdDepth)
 {
 	cl_int errNum;
     float2 *pGSBuffer = new float2[rdWidth * rdHeight * rdDepth];
- 
+ 	srand( time( NULL ) );
+
    // initialize each cell to a random state
     for( int x = 0; x < rdWidth; x++ )
     {
@@ -746,11 +782,20 @@ void Cleanup()
 		if( sum_kernel != 0 ) 
                 clReleaseKernel(sum_kernel);
 
+		if( new_kernel != 0 )
+				clReleaseKernel(new_kernel);
+
         if( rd_in != 0 )
                 clReleaseMemObject(rd_in);
 
 		if( rd_out != 0 )
                 clReleaseMemObject(rd_out);
+
+        if( bio_in != 0 )
+                clReleaseMemObject(bio_in);
+
+		if( bio_out != 0 )
+                clReleaseMemObject(bio_out);
 
 		if( rd_results != 0 )
                 clReleaseMemObject(rd_results);
@@ -988,15 +1033,199 @@ void initTexture( int width, int height, int depth )
             height, depth, 0, GL_RGBA, GL_FLOAT, NULL );
 }
 */
+
+bool setUpCarbonMap (void)
+{
+	std::ifstream inFile("carbon.txt.txt", std::ios::in); //inFile object name
+	if(!inFile)
+	{
+		std::cerr << "ERROR opening C map data file" << std::endl;
+		return false;
+	}	
+	scalar	min=	1E34f;
+	scalar	max=	-1E34f;
+	scalar	v, tot=0.0;
+	int		nz= 0;
+
+	for(int k=0; k<BUFFER_SIZE_X; k++)
+	{			
+		for(int j=0; j<BUFFER_SIZE_Y; j++)
+		{
+			for(int i=0; i<BUFFER_SIZE_Z; i++)
+			{	
+				inFile >> v;
+				{
+					nz++;
+					tot+=	 v;
+					if (v > max) max=	(float)v;		
+					if (v < min) min=	(float)v;	
+					carbonMap[i][j][k]=265.2500e-06;
+				}
+			
+								
+			}			
+		}
+	}
+	
+	inFile.close();
+	return true;
+}
+UINT loadRaw (const char * const filePath, UINT8 * const pB, const int count)
+{
+	std::ifstream inFile(filePath, std::ios::in);
+
+	if(!inFile)
+	{
+		std::cerr << "ERROR opening vol data file" << std::endl;
+		return(0);
+	}	
+	UINT8 min= 0xFF, max= 0, v;
+	float t=0.0, mean;
+
+	inFile.read((char*)pB, count);
+	for (int i=0; i < count; i++)
+	{	
+		v= pB[i];
+		t+=	 v;
+		if (v > max) max=	v;		
+		if (v < min) min=	v;
+	}			
+		
+	inFile.close();
+	mean= t / count;
+	return(count);
+} 
+
+
+bool setupStructureData (void)
+{
+	const ByteInterval	*pI=	ivlTable;
+	ByteArray			*pF= NULL;
+
+	if (loadRaw("s1centre(200,200,200).u8", (UINT8*)(gByteArray.b), sizeof(gByteArray)))
+	{
+		return true;
+	}
+	else
+	std::cerr << "ERROR opening vol data file" << std::endl;
+	return false;
+}
+
+struct V3U32
+{
+	V3U32 (UINT tx=0, UINT ty=0, UINT tz=0) {x= tx; y= ty; z= tz;}
+	UINT x, y, z;
+};
+
+UINT indexV3U32 (const UINT x, const UINT y, const UINT z, const V3U32& dim)
+{
+	return(x + dim.x * (y + dim.y * z));
+
+}
+
+void createMicroResources()
+{
+	cl_int errNum;
+
+	printf("Creating microFun resources..\n");
+
+    BioBufType *pBiomassBuffer = new BioBufType[NUM_POINTS];
+	
+	setUpCarbonMap();
+
+	scalar carbon=0.0;
+	// initialize each cell to a random state
+	for( int x = 0; x < BUFFER_SIZE_X; x++ )
+	{
+		for( int y = 0; y < BUFFER_SIZE_Y; y++ )
+		{
+			for ( int z = 0; z < BUFFER_SIZE_Z; z++)
+			{
+				int i=x + (y * BUFFER_SIZE_X) + (z * BUFFER_SIZE_X*BUFFER_SIZE_Y);
+				
+				pBiomassBuffer[i].state =0.0;//rand()%3==0?1:0;
+				pBiomassBuffer[i].mb = 0.0;//rand()%3==0?1:0;
+				pBiomassBuffer[i].ins = 0.0;//rand()%3==0?1:0;
+				pBiomassBuffer[i].ex_re =carbonMap[x][y][z]*1000000;//carbonMap[x][y][z];//rand()%3==0?1:0;
+				//conservation+=pBiomassBuffer[i].ex_re;
+				carbon+=pBiomassBuffer[i].ex_re;
+
+			}
+		}
+	}
+
+	printf(" TOTAL CARBON %f \n", carbon/1000000 );
+
+	setupStructureData();
+
+	double inn=0;
+	scalar inn_vxl=4.755111745e-06;//0.05/(BUFFER_SIZE_Y-2,BUFFER_SIZE_X-2);
+	int por=0;
+	// Initialise some growth by creating a plane of activity in the volume
+	int radius = 20;
+	int r2 = radius * radius; 
+	int cx=BUFFER_SIZE_X/2, cy=BUFFER_SIZE_Y/2, cz = BUFFER_SIZE_Z/2;
+	for( int x = 1; x < 2; x++ )
+	//{
+		for( int y = 1; y <  BUFFER_SIZE_Y-1; y++ )
+		{
+			for(int z = 1; z < BUFFER_SIZE_Z-1; z++)
+			{
+				//const int i= 1 +(y * BUFFER_SIZE_X )+ (z * BUFFER_SIZE_Y*BUFFER_SIZE_Z);
+
+				const int i= indexV3U32( x, y, z, V3U32( BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z ) );
+				
+				if( gByteArray.b[z][y][1] == 0 )
+				{
+					pBiomassBuffer[i].mb = 0.4*inn_vxl*1000000;//rand()%3==0?1:0;theta
+					inn+=pBiomassBuffer[i].mb;
+				
+					pBiomassBuffer[i].state = 0.6*inn_vxl*1000000;//rand()%3==0?1:0;
+					inn+=pBiomassBuffer[i].state;
+				
+					pBiomassBuffer[i].ins =  0*inn_vxl*1000000;//rand()%3==0?1:0;
+					inn+=pBiomassBuffer[i].ins;
+					por++;
+				}
+
+			}
+		}
+	printf(" INN %f \n", inn/1000000 );
+	printf(" PORES %i \n", por);
+
+	// create cl buffer
+	bio_in = clCreateBuffer(
+		context,
+		CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		sizeof(BioBufType)*NUM_POINTS,
+		pBiomassBuffer,
+		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating biomass input buffer." << std::endl;
+	}
+
+	bio_out = clCreateBuffer(
+		context,
+		CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+		sizeof(BioBufType)*NUM_POINTS,
+		pBiomassBuffer,
+		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating biomass output buffer" << std::endl;
+	}
+
+    delete [] pBiomassBuffer;
+}
+
 int main(int argc, char** argv)
 {
-	srand( time( NULL ) );
 	printf("simulating for %d values..\n", NUM_POINTS);
 	imWidth = 512; 
 	imHeight = 512;
 	cl_device_id device = 0;
 	initGlut(argc, argv, imWidth, imHeight);
-	//initTexture(BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z);
 
 	float4* colours = new float4[NUM_POINTS];
 
@@ -1032,7 +1261,11 @@ int main(int argc, char** argv)
 	delete [] colours;
 	delete [] position_buffer;
 
-		std::cout << "OpenGL resources created..\nInitialising OpenCL..\n";
+	
+	std::cout << "OpenGL resources created..\nInitialising OpenCL..\n";
+
+
+
 	// Create an OpenCL context with GL sharing 
     context = CreateContext();
     if (context == NULL)
@@ -1057,9 +1290,11 @@ int main(int argc, char** argv)
         return 1;
     }
 			
-			// create cl buffer with rd data
-			reset_rd(BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z);
-			cl_int errNum;
+	createMicroResources();
+
+	// create cl buffer with rd data
+	reset_rd(BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z);
+	cl_int errNum;
 
 	cl_colour = clCreateFromGLBuffer(
 		context,
@@ -1071,15 +1306,7 @@ int main(int argc, char** argv)
 		std::cerr<< "Failed creating colour output buffer" << std::endl;
 	}
 
-			/*
-			cl_volume = cl::Image3DGL(
-				context,
-				CL_MEM_WRITE_ONLY,
-				GL_TEXTURE_3D,
-				0,
-				tex);
-			*/
-			// create kernel
+	// create kernel
     rd_kernel = clCreateKernel(program, "rd_kernel", NULL);
     if (rd_kernel == NULL)
     {
@@ -1106,15 +1333,21 @@ int main(int argc, char** argv)
         return 1;
     }
 
+	// Create OpenCL kernel
+    new_kernel = clCreateKernel(program, "microFun", NULL);
+    if (new_kernel == NULL)
+    {
+        std::cerr << "Failed to create new kernel" << std::endl;
+        Cleanup();
+        return 1;
+    }
 
+	printf("OpenCL resources created...\nInitial UV data\nCPU\n");
+	checkSum(rd_out, BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z);
 
-	std::cout << "Initial UV data" << std::endl;
-		std::cout << "CPU" << std::endl;
-		checkSum(rd_out, BUFFER_SIZE_X, BUFFER_SIZE_Y, BUFFER_SIZE_Z);
-	//compute_rd();
-	//compute_output();
+	printf("Beginning Simulation...\n");
+	sim_start = get_time();
 
-	std::cout << "Beginning Simulation..." << std::endl;
 	glutMainLoop();
 
 	Cleanup();
