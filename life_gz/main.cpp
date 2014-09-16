@@ -14,7 +14,8 @@
 #include <CL/cl.h>
 #endif
 
-bool show_debug = false;
+bool show_debug = true;
+bool show_debug_all = false;
 
 int imWidth = 16;
 int imHeight = 16;
@@ -26,8 +27,12 @@ cl_kernel kernel;
 cl_kernel tex_kernel;
 cl_mem conway_in;
 cl_mem conway_out;
+cl_mem conway_check;
 cl_mem sub_buffer_in[3];
-cl_mem sub_buffer_out[3];
+cl_mem sub_buffer_out;
+cl_mem ghost_zones[2];
+cl_mem check_zones[2];
+cl_mem temp_zones[2];
 cl_context context;
 cl_command_queue commandQueue;
 cl_program program;
@@ -93,6 +98,15 @@ void Cleanup()
 
 		if( conway_out != 0 )
                 clReleaseMemObject(conway_out);
+
+		if( conway_check != 0 )
+                clReleaseMemObject(conway_check);
+
+		if( temp_zones[0] != 0 )
+                clReleaseMemObject(temp_zones[0]);
+
+		if( temp_zones[1] != 0 )
+                clReleaseMemObject(temp_zones[1]);
 }
 
 
@@ -238,7 +252,7 @@ cl_context CreateContext()
 		std::cerr << "Failed to find any OpenCl platforms." << std::endl;
 		return NULL;
 	}
-	std::cout << "Total number of Platforms available : " << numPlatforms << std::endl;
+	//std::cout << "Total number of Platforms available : " << numPlatforms << std::endl;
 
 	platformIDs = (cl_platform_id*) alloca(sizeof(cl_platform_id)*numPlatforms);
 	
@@ -248,13 +262,13 @@ cl_context CreateContext()
 		std::cerr << errNum << " - Error getting platforms" << std::endl;
 		return NULL;
 	}
-	std::cout << "platforms created \n";
+	//std::cout << "platforms created \n";
 
 	// Assign memory to context pointer for all platform
 	context = (cl_context *)alloca(sizeof(cl_context) * numPlatforms);
 	for(cl_uint i = 0; i < numPlatforms; i++)
 	{
-		std::cout << "Trying to create context for platform " << i << ".." << std::endl;
+		//std::cout << "Trying to create context for platform " << i << ".." << std::endl;
 		cl_context_properties properties[] =
 		{
 			CL_CONTEXT_PLATFORM, (cl_context_properties)platformIDs[i], 0
@@ -266,14 +280,14 @@ cl_context CreateContext()
 			std::cerr << errNum << " - Error" << std::endl;
 			return NULL;
 		}
-
+		/*
 		size_t size;
 		clGetContextInfo(context[i], CL_CONTEXT_DEVICES, 0, NULL, &size);
-
+		
 		cl_device_id * devices = (cl_device_id*)alloca(sizeof(cl_device_id) * size);
 
 		clGetContextInfo(context[i], CL_CONTEXT_DEVICES, size, devices, NULL);
-		
+
 		std::cout << "Devices available within context " << i << std::endl;
 		for(size_t j = 0; j < size / sizeof(cl_device_id); j++)
 		{
@@ -294,6 +308,7 @@ cl_context CreateContext()
 				break;
 			}
 		}
+		*/
 	}
 /*
 	errNum = clGetPlatformIDs(1, &firstPlatformId, &numPlatforms);
@@ -329,6 +344,123 @@ cl_context CreateContext()
 	return context[0];
 }
 
+int* get_new_ghost_row()
+{
+	// create state buffer
+	int *pConwayBuffer = new int[imWidth];
+
+	std::cout << "Receiving incoming ghost zone row.." << std::endl; 
+	 // initialize each cell to a random state
+    for( int x = 0; x < imWidth; x++ )
+    {
+            pConwayBuffer[x] = rand()%3==0?1:0;
+if(show_debug)
+{
+			std::cout << pConwayBuffer[x] << " ";
+}
+    }
+if(show_debug)
+{
+	std::cout << std::endl; 
+}
+	return pConwayBuffer;
+}
+
+// simulate receiving top ghost zone from MPI
+void receive_top()
+{
+	cl_int errNum;
+
+	// receive ghost zone
+	int* ghost = get_new_ghost_row();
+	//print_new_ghost_row(ghost);
+
+	errNum = clEnqueueWriteBuffer(commandQueue,
+		 ghost_zones[0],
+		 CL_TRUE,
+		 0,
+		 sizeof(int)*imWidth,
+		 ghost,
+		 0,
+		 NULL,
+		 NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error writing ghost zone to sub-buffer." << std::endl;
+    }
+	errNum = clEnqueueWriteBuffer(commandQueue,
+		 check_zones[0],
+		 CL_TRUE,
+		 0,
+		 sizeof(int)*imWidth,
+		 ghost,
+		 0,
+		 NULL,
+		 NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error writing ghost zone to sub-buffer." << std::endl;
+    }
+
+	delete [] ghost;
+}
+
+// simulate receiving bottom ghost zone from MPI
+// same as receive_top just with different sub-buffer
+// still using blocking
+void receive_bottom()
+{
+	cl_int errNum;
+
+	// receive ghost zone
+	int* ghost = get_new_ghost_row();
+	//print_new_ghost_row(ghost);
+
+	errNum = clEnqueueWriteBuffer(commandQueue,
+		 ghost_zones[1],
+		 CL_TRUE,
+		 0,
+		 sizeof(int)*imWidth,
+		 ghost,
+		 0,
+		 NULL,
+		 NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error writing ghost zone to sub-buffer." << std::endl;
+    }
+	errNum = clEnqueueWriteBuffer(commandQueue,
+		 check_zones[1],
+		 CL_TRUE,
+		 0,
+		 sizeof(int)*imWidth,
+		 ghost,
+		 0,
+		 NULL,
+		 NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error writing ghost zone to sub-buffer." << std::endl;
+    }
+
+	delete [] ghost;
+}
+
+void print_new_ghost_row(int* pConwayBuffer)
+{
+	std::cout << "Printing incoming ghost zone row.." << std::endl; 
+	 // initialize each cell to a random state
+    for( int x = 0; x < imWidth; x++ )
+    {
+		std::cout << pConwayBuffer[x ] << " ";
+    }
+	std::cout << std::endl; 
+}
+
 void CreateIOResources()
 {
 	cl_int errNum;
@@ -336,7 +468,7 @@ void CreateIOResources()
 	// create state buffer
 	int *pConwayBuffer = new int[imWidth*imHeight];
 
-	std::cout << "Creating conway input buffer.." << std::endl; 
+	//std::cout << "Creating conway input buffer.." << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < imWidth; x++ )
     {
@@ -344,11 +476,11 @@ void CreateIOResources()
         {
             pConwayBuffer[y + x * imWidth ] = rand()%3==0?1:0;
 			//pConwayBuffer[ y + x * imWidth ] = y + x * imWidth;	// give index to debug
-			std::cout << pConwayBuffer[y + x * imWidth] << " ";
+			//std::cout << pConwayBuffer[y + x * imWidth] << " ";
 		}
-		std::cout << std::endl; 
+		//std::cout << std::endl; 
     }
-	std::cout << std::endl; 
+	//std::cout << std::endl; 
 
 	// create cl buffers
 	conway_in = clCreateBuffer(
@@ -361,8 +493,9 @@ void CreateIOResources()
 	{
 		std::cerr<< "Failed creating memory from buffer." << std::endl;
 	}
+	delete [] pConwayBuffer;
 
-if(show_debug)	// check input buffer is set as pConwayBuffer
+if(show_debug_all)	// check input buffer is set as pConwayBuffer
 {
 	int* input = new int[imWidth*imHeight];
 	errNum = clEnqueueReadBuffer(commandQueue, 
@@ -394,6 +527,7 @@ if(show_debug)	// check input buffer is set as pConwayBuffer
 	delete [] input;
 }
 
+	// output buffer
 	conway_out = clCreateBuffer(
 		context,
 		CL_MEM_READ_WRITE,
@@ -404,19 +538,50 @@ if(show_debug)	// check input buffer is set as pConwayBuffer
 	{
 		std::cerr<< "Failed creating memory from buffer." << std::endl;
 	}
-	
-	delete [] pConwayBuffer;
+	// output buffer
+	conway_check = clCreateBuffer(
+		context,
+		CL_MEM_READ_WRITE,
+		sizeof(int)*imWidth*imHeight,
+		NULL,
+		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating memory from buffer." << std::endl;
+	}	
+
+	// temp zones contain the full amount of memory needed for compute top and bottom ghost 	
+	temp_zones[0] = clCreateBuffer(
+		context,
+		CL_MEM_READ_WRITE,
+		sizeof(int)*imWidth*(imHeight/4),
+		NULL,
+		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating memory from buffer." << std::endl;
+	}
+	temp_zones[1] = clCreateBuffer(
+		context,
+		CL_MEM_READ_WRITE,
+		sizeof(int)*imWidth*(imHeight/4),
+		NULL,
+		&errNum);
+	if( errNum != CL_SUCCESS )
+	{
+		std::cerr<< "Failed creating memory from buffer." << std::endl;
+	}
+
 }
 
 
-cl_int compute_all()
+cl_int compute_check()
 {
 	cl_int errNum;
-	std::cout << "COMPUTE ALL" << std::endl;
-	int width = 	imWidth;
-	int height =  imHeight;
+	int width = imWidth;
+	int height = imHeight;
 
-if(show_debug)
+if(show_debug_all)
 {
 	// read input buffer to output to screen
 	int* input = new int[width*height];
@@ -436,7 +601,7 @@ if(show_debug)
     }
 
 	clFinish(commandQueue);
-	std::cout << "BEFORE" << std::endl; 
+	std::cout << "CHECK BEFORE" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < imHeight; x++ )
     {
@@ -461,7 +626,7 @@ if(show_debug)
 	errNum = clSetKernelArg(kernel, 1, sizeof(int), &width);
 	errNum = clSetKernelArg(kernel, 2, sizeof(int), &height);
     errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &conway_out);
+	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &conway_check);
 
 	int globalX = ((imWidth - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((imHeight - 1)/(ThreadsY - 2) + 1) * ThreadsY;
@@ -469,43 +634,53 @@ if(show_debug)
     size_t localWorkSize[2] = { ThreadsX, ThreadsY } ;
     size_t globalWorkSize[2] =  {  globalX, globalY };
 
+if(show_debug)
+{
+	std::cout << "Compute Check Work Sizes" << std::endl; 
 	std::cout << "Global size " << globalX << ", " << globalY << std::endl;
 	std::cout << "Local size " << ThreadsX << ", " << ThreadsY << std::endl;
+	std::cout << std::endl;
+}
 
-	cl_event prof_event;
+	//cl_event prof_event;
 	// compute
     errNum = clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL,
                                     globalWorkSize, localWorkSize,
-                                    0, NULL, &prof_event);
+                                    0, NULL, NULL);// &prof_event);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
         std::cerr << "Error queuing conway kernel top for execution." << std::endl;
     }
 
+/*
 	std::cout << "\tcompute - " << completeEvent(prof_event, commandQueue) << " ms" << std::endl;
-
+	clReleaseEvent(prof_event);
+*/
+if(show_debug_all)
+{
 	// read output to screen
 	int* output = new int[width*height];
-	cl_event prof_read;
+	//cl_event prof_read;
 	errNum = clEnqueueReadBuffer(commandQueue, 
-		conway_out,
+		conway_check,
 		CL_TRUE,
 		0,
 		sizeof(int) * width * height,
 		output,
 		0,
 		NULL,
-		&prof_read);
+		NULL);
+		//&prof_read);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
         std::cerr << "Error reading output." << std::endl;
     }
 	
-	std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
-	clFinish(commandQueue);
-	std::cout << "AFTER" << std::endl; 
+	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
+	//clFinish(commandQueue);
+	std::cout << "CHECK AFTER" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < imHeight; x++ )
     {
@@ -516,13 +691,10 @@ if(show_debug)
 		std::cout << std::endl; 
     }
 	std::cout << std::endl; 
-	//y + x * imWidth
 
-	clReleaseEvent(prof_event);
-	clReleaseEvent(prof_read);
-
+	//clReleaseEvent(prof_read);
 	delete [] output;
-//	delete [] input;
+}
 
     return 0;
 }
@@ -531,11 +703,10 @@ if(show_debug)
 cl_int compute_top()
 {
 	cl_int errNum;
-	std::cout << "COMPUTE TOP" << std::endl;
-	int width = 	imWidth;
-	int height =  (imHeight/4);
+	int width = imWidth;
+	int height = (imHeight/4);
 
-if(show_debug)
+if(show_debug_all)
 {
 	// read input buffer to output to screen
 	int* input = new int[width*height];
@@ -555,7 +726,7 @@ if(show_debug)
     }
 
 	clFinish(commandQueue);
-	std::cout << "BEFORE" << std::endl; 
+	std::cout << "TOP BEFORE" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < imHeight/4; x++ )
     {
@@ -568,7 +739,6 @@ if(show_debug)
 	std::cout << std::endl; 
 
 	delete [] input;
-	//y + x * imWidth
 }
 
 	int ThreadsX = 4;
@@ -581,7 +751,7 @@ if(show_debug)
 	errNum = clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
 	errNum = clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
     errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &sub_buffer_out[0]);
+	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &temp_zones[0]);
 
 	int globalX = ((width - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((height - 1)/(ThreadsY - 2) + 1) * ThreadsY;
@@ -589,14 +759,19 @@ if(show_debug)
     size_t localWorkSize[2] = { ThreadsX, ThreadsY } ;
     size_t globalWorkSize[2] =  {  globalX, globalY };
 
+if(show_debug)
+{
+	std::cout << "Compute Top Work Sizes" << std::endl; 
 	std::cout << "Global size " << globalX << ", " << globalY << std::endl;
 	std::cout << "Local size " << ThreadsX << ", " << ThreadsY << std::endl;
-	
-	cl_event prof_event;
+	std::cout << std::endl;
+}
+
+	//cl_event prof_event;
 	// compute
     errNum = clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL,
                                     globalWorkSize, localWorkSize,
-                                    0, NULL, &prof_event);
+                                    0, NULL, NULL);//&prof_event);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
@@ -624,13 +799,14 @@ if(show_debug)
         std::cerr << "Error reading top output." << std::endl;
     }
 	*/
+
 	// since there are ghost zones involved, we only require the middle of the buffer,
 	// the first and last rows are not needed
 	// set offset and size as required!
 	int* output = new int[width*(height-2)];
 	cl_event prof_read;
 	errNum = clEnqueueReadBuffer(commandQueue, 
-		sub_buffer_out[0],
+		temp_zones[0],
 		CL_TRUE,
 		sizeof(int) * width,
 		sizeof(int) * width * (height - 2),
@@ -645,8 +821,9 @@ if(show_debug)
     }
 	
 	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
-	clFinish(commandQueue);
-	std::cout << "AFTER" << std::endl; 
+if(show_debug)
+{
+	std::cout << "TOP AFTER" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < (height - 2); x++ )
     {
@@ -657,13 +834,12 @@ if(show_debug)
 		std::cout << std::endl; 
     }
 	std::cout << std::endl; 
-	//y + x * imWidth
-
-	clReleaseEvent(prof_event);
+}
 	clReleaseEvent(prof_read);
-
 	delete [] output;
-	
+
+	//clReleaseEvent(prof_event);
+
     return 0;
 }
 
@@ -671,12 +847,10 @@ if(show_debug)
 cl_int compute_middle()
 {
 	cl_int errNum;
-	std::cout << "COMPUTE MIDDLE" << std::endl;
+	int width = imWidth;
+	int height = (imHeight/2) + 4;
 
-	int width = 	imWidth;
-	int height =  (imHeight/2)+4;
-
-if(show_debug)
+if(show_debug_all)
 {
 	// read input buffer to output to screen
 	int* input = new int[width*height];
@@ -696,7 +870,7 @@ if(show_debug)
     }
 
 	clFinish(commandQueue);
-	std::cout << "BEFORE" << std::endl; 
+	std::cout << "MIDDLE BEFORE" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < height; x++ )
     {
@@ -709,12 +883,10 @@ if(show_debug)
 	std::cout << std::endl; 
 
 	delete [] input;
-	//y + x * imWidth
 }
 
 	int ThreadsX = 4;
 	int ThreadsY = 4;
-
 
 	// set kernel arguments to compute,
 	// sub buffers require no need for offset
@@ -722,13 +894,18 @@ if(show_debug)
 	errNum = clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
 	errNum = clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
     errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &sub_buffer_out[1]);
+	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &sub_buffer_out);
 
 	int globalX = ((width - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((height - 1)/(ThreadsY - 2) + 1) * ThreadsY;
 
+if(show_debug)
+{
+	std::cout << "Compute Middle Work Sizes" << std::endl; 
 	std::cout << "Global size " << globalX << ", " << globalY << std::endl;
 	std::cout << "Local size " << ThreadsX << ", " << ThreadsY << std::endl;
+	std::cout << std::endl; 
+}
 
     size_t localWorkSize[2] = { ThreadsX, ThreadsY } ;
     size_t globalWorkSize[2] =  {  globalX, globalY };
@@ -765,10 +942,12 @@ if(show_debug)
         std::cerr << "Error reading middle output." << std::endl;
     }
 	*/
+if(show_debug_all)
+{	// dont need to read middle buffer
 	int* output = new int[width*(height-2)];
 	cl_event prof_read;
 	errNum = clEnqueueReadBuffer(commandQueue, 
-		sub_buffer_out[1],
+		sub_buffer_out,
 		CL_TRUE,
 		sizeof(int) * width,
 		sizeof(int) * width * (height - 2),
@@ -783,8 +962,7 @@ if(show_debug)
     }
 	
 	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
-	clFinish(commandQueue);
-	std::cout << "AFTER" << std::endl; 
+	std::cout << "MIDDLE AFTER" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < (height-2); x++ )
     {
@@ -795,12 +973,13 @@ if(show_debug)
 		std::cout << std::endl; 
     }
 	std::cout << std::endl; 
-	//y + x * imWidth
 
-	clReleaseEvent(prof_event);
 	clReleaseEvent(prof_read);
 
 	delete [] output;
+}
+
+	clReleaseEvent(prof_event);
 
     return 0;
 }
@@ -808,11 +987,10 @@ if(show_debug)
 cl_int compute_bottom()
 {
 	cl_int errNum;
-	std::cout << "COMPUTE BOTTOM" << std::endl;
 	int width = 	imWidth;
 	int height =  (imHeight/4);
 
-if(show_debug)
+if(show_debug_all)
 {
 	// read input buffer to output to screen
 	int* input = new int[width*height];
@@ -832,7 +1010,7 @@ if(show_debug)
     }
 
 	clFinish(commandQueue);
-	std::cout << "BEFORE" << std::endl; 
+	std::cout << "BOTTOM BEFORE" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < imHeight/4; x++ )
     {
@@ -855,13 +1033,18 @@ if(show_debug)
 	errNum = clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
 	errNum = clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
     errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &sub_buffer_out[2]);
+	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &temp_zones[1]);
 
 	int globalX = ((width - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((height - 1)/(ThreadsY - 2) + 1) * ThreadsY;
 
+if(show_debug)
+{
+	std::cout << "Compute Bottom Work Sizes" << std::endl; 
 	std::cout << "Global size " << globalX << ", " << globalY << std::endl;
 	std::cout << "Local size " << ThreadsX << ", " << ThreadsY << std::endl;
+	std::cout << std::endl;
+}
 
     size_t localWorkSize[2] = { ThreadsX, ThreadsY } ;
     size_t globalWorkSize[2] =  {  globalX, globalY };
@@ -899,7 +1082,7 @@ if(show_debug)
 	int* output = new int[width*(height-2)];
 	cl_event prof_read;
 	errNum = clEnqueueReadBuffer(commandQueue, 
-		sub_buffer_out[2],
+		temp_zones[1],
 		CL_TRUE,
 		sizeof(int) * width,
 		sizeof(int) * width * (height - 2),
@@ -914,9 +1097,9 @@ if(show_debug)
     }
 	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
 
-
-	clFinish(commandQueue);
-	std::cout << "AFTER" << std::endl; 
+if(show_debug)
+{
+	std::cout << "BOTTOM AFTER" << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < (height - 2); x++ )
     {
@@ -927,8 +1110,7 @@ if(show_debug)
 		std::cout << std::endl; 
     }
 	std::cout << std::endl; 
-	//y + x * imWidth
-
+}
 
 	clReleaseEvent(prof_event);
 	clReleaseEvent(prof_read);
@@ -936,6 +1118,45 @@ if(show_debug)
 	delete [] output;
 
     return 0;
+}
+
+void update_buffer()
+{
+	cl_int errNum;
+	int width = imWidth;
+	int height = imHeight/4;
+
+	// write required temp zone section to output buffer 
+	errNum = clEnqueueCopyBuffer(commandQueue,
+		 temp_zones[0],	// source buffer
+		 conway_out, // destination buffer
+		 sizeof(int) * width,	// source offset
+		 sizeof(int) * width,		// destination offset
+		 sizeof(int) * width * (height - 2),	// size to copy
+		 0,
+		 NULL,
+		 NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error copy temp zone to output buffer." << std::endl;
+    }
+
+	// write required temp zone section to output buffer 
+	errNum = clEnqueueCopyBuffer(commandQueue,
+		 temp_zones[1],	// source buffer
+		 conway_out, // destination buffer
+		 sizeof(int) * width,	// source offset
+		 sizeof(int) * width * (3*height + 1),		// destination offset
+		 sizeof(int) * width * (height - 2),	// size to copy
+		 0,
+		 NULL,
+		 NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error copy temp zone to output buffer." << std::endl;
+    }
 }
 
 void create_subs()
@@ -951,21 +1172,48 @@ void create_subs()
 		0,
 		chunk_size
 	};
-
 	sub_buffer_in[0] = clCreateSubBuffer(conway_in,
 		CL_MEM_READ_ONLY,
 		CL_BUFFER_CREATE_TYPE_REGION,
 		&region0,
 		&errNum);
-	sub_buffer_out[0] = clCreateSubBuffer(conway_out,
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
+
+	// create ghost zone for incoming ghost zone (1 row)
+	cl_buffer_region ghost_top =
+	{
+		0,
+		sizeof(int) * imWidth
+	};
+	ghost_zones[0] = clCreateSubBuffer(conway_out,
 		CL_MEM_READ_WRITE,
 		CL_BUFFER_CREATE_TYPE_REGION,
-		&region0,
+		&ghost_top,
 		&errNum);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
+	check_zones[0] = clCreateSubBuffer(conway_check,
+		CL_MEM_READ_WRITE,
+		CL_BUFFER_CREATE_TYPE_REGION,
+		&ghost_top,
+		&errNum);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
+
 	int width = 	imWidth;
 	int height =  (imHeight/4);
 
-if(show_debug)
+if(show_debug_all)
 {
 	// read input buffer to output to screen
 	int* input = new int[width*height];
@@ -1011,13 +1259,40 @@ if(show_debug)
 		CL_BUFFER_CREATE_TYPE_REGION,
 		&region2,
 		&errNum);
-	sub_buffer_out[2] = clCreateSubBuffer(conway_out,
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
+
+	// create ghost zone for incoming ghost zone (1 row)
+	cl_buffer_region ghost_bottom =
+	{
+		sizeof(int) * imWidth * (imHeight -1),
+		sizeof(int) * imWidth
+	};
+	ghost_zones[1] = clCreateSubBuffer(conway_out,
 		CL_MEM_READ_WRITE,
 		CL_BUFFER_CREATE_TYPE_REGION,
-		&region2,
+		&ghost_bottom,
 		&errNum);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
+	check_zones[1] = clCreateSubBuffer(conway_check,
+		CL_MEM_READ_WRITE,
+		CL_BUFFER_CREATE_TYPE_REGION,
+		&ghost_bottom,
+		&errNum);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
 
-if(show_debug)
+if(show_debug_all)
 {
 	int* input = new int[width*height];
 	errNum = clEnqueueReadBuffer(commandQueue, 
@@ -1063,13 +1338,23 @@ if(show_debug)
 		CL_BUFFER_CREATE_TYPE_REGION,
 		&region1,
 		&errNum);
-	sub_buffer_out[1] = clCreateSubBuffer(conway_out,
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
+	sub_buffer_out = clCreateSubBuffer(conway_out,
 		CL_MEM_READ_WRITE,
 		CL_BUFFER_CREATE_TYPE_REGION,
 		&region1,
 		&errNum);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error creating sub buffer" << std::endl;
+    }
 
-if(show_debug)
+if(show_debug_all)
 {
 	int* middle = new int[ imWidth * (2 *rows_per_chunk + 4)];
 	errNum = clEnqueueReadBuffer(commandQueue, 
@@ -1105,7 +1390,7 @@ if(show_debug)
 
 }
 
-void check_conway_out()
+void print_output()
 {
 	cl_int errNum;
 	int* output = new int[imWidth*imHeight];
@@ -1124,7 +1409,7 @@ void check_conway_out()
         std::cerr << "Error reading output buffer." << std::endl;
     }
 	clFinish(commandQueue);
-	std::cout << "Checking output buffer.." << std::endl; 
+	std::cout << "Displaying Output Buffer.." << std::endl; 
 	 // initialize each cell to a random state
     for( int x = 0; x < imWidth; x++ )
     {
@@ -1138,6 +1423,100 @@ void check_conway_out()
 	delete [] output;
 }
 
+void check_compute()
+{
+	cl_int errNum;
+	int width = imWidth;
+	int height = imHeight;
+
+	clFinish(commandQueue);
+
+	// read output buffer
+	int* output = new int[width*height];
+	//cl_event prof_read;
+	errNum = clEnqueueReadBuffer(commandQueue, 
+		conway_out,
+		CL_TRUE,
+		0,
+		sizeof(int) * width * height,
+		output,
+		0,
+		NULL,
+		NULL);
+		//&prof_read);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error reading output." << std::endl;
+    }
+
+	// read check buffer
+	int* check = new int[width*height];
+	//cl_event prof_read;
+	errNum = clEnqueueReadBuffer(commandQueue, 
+		conway_check,
+		CL_TRUE,
+		0,
+		sizeof(int) * width * height,
+		check,
+		0,
+		NULL,
+		NULL);
+		//&prof_read);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error reading output." << std::endl;
+    }
+	
+	// check for errors
+	int errors = 0;
+    for( int x = 0; x < height; x++ )
+    {
+        for( int y = 0; y < width; y++ )
+        {
+			if(output[y + x * width] != check[y + x * width])
+			{
+				std::cout << "error location found - " << x << ", " << y << std::endl;
+				errors++;
+			}
+		}
+    }
+	// if errors output both to screen
+	if(errors > 0)
+	{
+		std::cout << errors << " ERRORS FOUND!" << std::endl; 
+		std::cout << "PRINTING OUTPUT" << std::endl; 
+		 // initialize each cell to a random state
+		for( int x = 0; x < imHeight; x++ )
+		{
+			for( int y = 0; y < imWidth; y++ )
+			{
+				std::cout << output[y + x * imWidth] << " ";
+			}
+			std::cout << std::endl; 
+		}
+		std::cout << std::endl; 
+
+		std::cout << "PRINTING CHECK" << std::endl; 
+		 // initialize each cell to a random state
+		for( int x = 0; x < imHeight; x++ )
+		{
+			for( int y = 0; y < imWidth; y++ )
+			{
+				std::cout << check[y + x * imWidth] << " ";
+			}
+			std::cout << std::endl; 
+		}
+		std::cout << std::endl; 
+	}
+	else
+		std::cout << "No errors found " << std::endl;
+
+	delete [] output;
+	delete [] check;
+}
+
 ///
 //      main() for GLinterop example
 //
@@ -1148,6 +1527,7 @@ int main(int argc, char** argv)
 	cl_device_id device = 0;
 
 	srand( (UINT)time( NULL ) );
+
 
 	//imWidth = RoundUp(32, 400); 
 	//imHeight = RoundUp(32, 300);
@@ -1192,17 +1572,32 @@ int main(int argc, char** argv)
         return 1;
     }
 
-	std::cout<< "CL resources created. Entering main loop... \n";
+	//std::cout<< "CL resources created. Entering main loop... \n";
 
 	// insert simulation loop here
 	for(int j = 0; j < 100; j++)
 	{
+		// compute pass to calculate correct output buffer
+		// conway_check will not have updated ghost zones
+		compute_check();
+
 		compute_top();
-		compute_middle();	//do middle last in practise but to check it is easier in order
+		receive_top();
+
 		compute_bottom();
-		
-		//check_conway_out();
-		compute_all();
+		receive_bottom();
+
+		compute_middle();	//do middle last in practise but to check it is easier in order
+
+		update_buffer();
+
+		check_compute();
+
+if(show_debug)
+{
+		print_output();
+}
+
 		std::swap<cl_mem>(conway_in, conway_out);
 
 		system("pause");
