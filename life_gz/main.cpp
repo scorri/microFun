@@ -26,7 +26,7 @@ const int ThreadsY = 4;
 // OpenCL variables, objects
 //
 cl_kernel kernel;
-cl_kernel tex_kernel;
+cl_kernel copy_kernel;
 
 // input/output buffers
 cl_mem conway_in;
@@ -44,6 +44,127 @@ cl_mem temp_zones[2];	// output sections for some to be copied to output and gho
 cl_context context;
 cl_command_queue commandQueue;
 cl_program program;
+
+void CL_CALLBACK transmit_top_ghost(cl_event my_event, cl_int cmd_exec_status, void *user_data)
+{
+    // handle the callback here.
+	int* output = (int*) user_data;
+
+	/*
+	// To Profile Ghost Zone Read
+	cl_int errNum;
+	cl_ulong ev_start_time = (cl_ulong)0;
+	cl_ulong ev_end_time = (cl_ulong)0;
+	
+	errNum = clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_QUEUED, 				
+		sizeof(cl_ulong), &ev_start_time, NULL);
+	errNum |= clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_END, 					
+		sizeof(cl_ulong), &ev_end_time, NULL);
+	if(errNum != CL_SUCCESS)
+		std::cout << "Error profiling event : " << errNum << std::endl;
+
+	double event_time = (ev_end_time - ev_start_time)*1.0e-6;	// ms
+	std::cout << event_time << " ms" << std::endl;
+	*/
+
+	std::cout << "CALLBACK triggered - send UP" << std::endl; 
+	 // initialize each cell to a random state
+    for( int y = 0; y < imWidth; y++ )
+    {
+		std::cout << output[y] << " ";
+	}
+	std::cout << std::endl; 
+
+	delete [] output;	
+	clReleaseEvent(my_event);
+}
+
+void CL_CALLBACK receive_top_ghost(cl_event my_event, cl_int cmd_exec_status, void *user_data)
+{
+    // handle the callback here.
+
+	/*
+	// To Profile Ghost Zone Write
+	cl_int errNum;
+	cl_ulong ev_start_time = (cl_ulong)0;
+	cl_ulong ev_end_time = (cl_ulong)0;
+	
+	errNum = clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_QUEUED, 				
+		sizeof(cl_ulong), &ev_start_time, NULL);
+	errNum |= clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_END, 					
+		sizeof(cl_ulong), &ev_end_time, NULL);
+	if(errNum != CL_SUCCESS)
+		std::cout << "Error profiling event : " << errNum << std::endl;
+
+	double event_time = (ev_end_time - ev_start_time)*1.0e-6;	// ms
+	std::cout << event_time << " ms" << std::endl;
+	*/
+
+	std::cout << "CALLBACK triggered - receive top" << std::endl; 
+
+	clReleaseEvent(my_event);
+}
+
+void CL_CALLBACK receive_bottom_ghost(cl_event my_event, cl_int cmd_exec_status, void *user_data)
+{
+    // handle the callback here.
+
+	/*
+	// To Profile Ghost Zone Write
+	cl_int errNum;
+	cl_ulong ev_start_time = (cl_ulong)0;
+	cl_ulong ev_end_time = (cl_ulong)0;
+	
+	errNum = clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_QUEUED, 				
+		sizeof(cl_ulong), &ev_start_time, NULL);
+	errNum |= clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_END, 					
+		sizeof(cl_ulong), &ev_end_time, NULL);
+	if(errNum != CL_SUCCESS)
+		std::cout << "Error profiling event : " << errNum << std::endl;
+
+	double event_time = (ev_end_time - ev_start_time)*1.0e-6;	// ms
+	std::cout << event_time << " ms" << std::endl;
+	*/
+
+	std::cout << "CALLBACK triggered - receive bottom" << std::endl; 
+
+	clReleaseEvent(my_event);
+}
+
+// same as transmit_top_ghost - could include tag in user data to determine where to send
+void CL_CALLBACK transmit_bottom_ghost(cl_event my_event, cl_int cmd_exec_status, void *user_data)
+{
+    // handle the callback here.
+	int* output = (int*) user_data;
+
+	/*
+	// To Profile Ghost Zone Read
+	cl_int errNum;
+	cl_ulong ev_start_time = (cl_ulong)0;
+	cl_ulong ev_end_time = (cl_ulong)0;
+	
+	errNum = clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_QUEUED, 				
+		sizeof(cl_ulong), &ev_start_time, NULL);
+	errNum |= clGetEventProfilingInfo(my_event, CL_PROFILING_COMMAND_END, 					
+		sizeof(cl_ulong), &ev_end_time, NULL);
+	if(errNum != CL_SUCCESS)
+		std::cout << "Error profiling event : " << errNum << std::endl;
+
+	double event_time = (ev_end_time - ev_start_time)*1.0e-6;	// ms
+	std::cout << event_time << " ms" << std::endl;
+	*/
+
+	std::cout << "CALLBACK triggered - send DOWN" << std::endl; 
+	// initialize each cell to a random state
+    for( int y = 0; y < imWidth; y++ )
+	{
+		std::cout << output[y] << " ";
+	}
+	std::cout << std::endl; 
+
+	delete [] output;	
+	clReleaseEvent(my_event);
+}
 
 ///
 //  Round up to the nearest multiple of the group size
@@ -95,6 +216,9 @@ void Cleanup()
 
         if( kernel != 0 ) 
                 clReleaseKernel(kernel);
+
+        if( copy_kernel != 0 ) 
+                clReleaseKernel(copy_kernel);
 
         if( conway_in != 0 )
                 clReleaseMemObject(conway_in);
@@ -318,20 +442,30 @@ void receive_top()
 	int* ghost = get_new_ghost_row();
 	//print_new_ghost_row(ghost);
 
+	cl_event write_event;
 	errNum = clEnqueueWriteBuffer(commandQueue,
 		 ghost_zones[0],
-		 CL_TRUE,
+		 CL_FALSE,
 		 0,
 		 sizeof(int)*imWidth,
 		 ghost,
 		 0,
 		 NULL,
-		 NULL);
+		 &write_event);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
         std::cerr << "Error writing ghost zone to sub-buffer." << std::endl;
     }
+
+	errNum = clSetEventCallback(write_event, CL_COMPLETE, &receive_top_ghost, NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting event callback (write)." << std::endl;
+    }
+
+
 	errNum = clEnqueueWriteBuffer(commandQueue,
 		 check_zones[0],
 		 CL_TRUE,
@@ -361,20 +495,29 @@ void receive_bottom()
 	int* ghost = get_new_ghost_row();
 	//print_new_ghost_row(ghost);
 
+	cl_event write_event;
 	errNum = clEnqueueWriteBuffer(commandQueue,
 		 ghost_zones[1],
-		 CL_TRUE,
+		 CL_FALSE,
 		 0,
 		 sizeof(int)*imWidth,
 		 ghost,
 		 0,
 		 NULL,
-		 NULL);
+		 &write_event);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
         std::cerr << "Error writing ghost zone to sub-buffer." << std::endl;
     }
+
+	errNum = clSetEventCallback(write_event, CL_COMPLETE, &receive_bottom_ghost, NULL);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting event callback (write)." << std::endl;
+    }
+
 	errNum = clEnqueueWriteBuffer(commandQueue,
 		 check_zones[1],
 		 CL_TRUE,
@@ -565,10 +708,15 @@ if(show_debug_all)
 	// set kernel arguments to compute,
 	// sub buffers require no need for offset
     errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &conway_in);
-	errNum = clSetKernelArg(kernel, 1, sizeof(int), &width);
-	errNum = clSetKernelArg(kernel, 2, sizeof(int), &height);
-    errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &conway_check);
+	errNum |= clSetKernelArg(kernel, 1, sizeof(int), &width);
+	errNum |= clSetKernelArg(kernel, 2, sizeof(int), &height);
+    errNum |= clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
+	errNum |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &conway_check);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting kernel args." << std::endl;
+    }
 
 	int globalX = ((imWidth - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((imHeight - 1)/(ThreadsY - 2) + 1) * ThreadsY;
@@ -772,10 +920,15 @@ cl_int compute_top()
 	// set kernel arguments to compute,
 	// sub buffers require no need for offset
     errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &sub_buffer_in[0]);
-	errNum = clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
-	errNum = clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
-    errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &temp_zones[0]);
+	errNum |= clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
+	errNum |= clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
+    errNum |= clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
+	errNum |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &temp_zones[0]);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting kernel args." << std::endl;
+    }
 
 	int globalX = ((width - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((height - 1)/(ThreadsY - 2) + 1) * ThreadsY;
@@ -808,36 +961,41 @@ if(show_debug)
 	// the first and last rows are not needed
 	// set offset and size as required!
 	int* output = new int[width];
-	//cl_event prof_read;
+	cl_event read_event;
 	errNum = clEnqueueReadBuffer(commandQueue, 
 		temp_zones[0],
-		CL_TRUE,
+		CL_FALSE,
 		sizeof(int) * width,
 		sizeof(int) * width,
 		output,
 		0,
 		NULL,
-		NULL);
-		//&prof_read);
+		&read_event);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
         std::cerr << "Error reading top output." << std::endl;
     }
-	
-	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
-if(show_debug)
-{
-	std::cout << "TOP ghost zone to send" << std::endl; 
-	 // initialize each cell to a random state
-    for( int y = 0; y < width; y++ )
+/*
+	// this is the same as using blocking
+	errNum = clWaitForEvents(1, &read_event);
+    if (errNum != CL_SUCCESS)
     {
-		std::cout << output[y] << " ";
-	}
-	std::cout << std::endl; 
-}
-	//clReleaseEvent(prof_read);
-	delete [] output;
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error waiting on events" << std::endl;
+    }
+*/
+	errNum = clSetEventCallback(read_event, CL_COMPLETE, &transmit_top_ghost, output);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting event callback (read)." << std::endl;
+    }
+
+	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
+
+	//clReleaseEvent(read_event);	// cant release if waiting for callback?
+	//delete [] output;	// can i delete output if im waiting on an event callback?
 
 	//clReleaseEvent(prof_event);
 
@@ -889,10 +1047,15 @@ if(show_debug_all)
 	// set kernel arguments to compute,
 	// sub buffers require no need for offset
     errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &sub_buffer_in[1]);
-	errNum = clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
-	errNum = clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
-    errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &sub_buffer_out);
+	errNum |= clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
+	errNum |= clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
+    errNum |= clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
+	errNum |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &sub_buffer_out);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting kernel args." << std::endl;
+    }
 
 	int globalX = ((width - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((height - 1)/(ThreadsY - 2) + 1) * ThreadsY;
@@ -972,10 +1135,15 @@ cl_int compute_bottom()
 	print_sub_2();
 
     errNum = clSetKernelArg(kernel, 0, sizeof(cl_mem), &sub_buffer_in[2]);
-	errNum = clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
-	errNum = clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
-    errNum = clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
-	errNum = clSetKernelArg(kernel, 4, sizeof(cl_mem), &temp_zones[1]);
+	errNum |= clSetKernelArg(kernel, 1, sizeof(int), &imWidth);
+	errNum |= clSetKernelArg(kernel, 2, sizeof(int), &imHeight);
+    errNum |= clSetKernelArg(kernel, 3, sizeof(int) * ThreadsX * ThreadsY, NULL);
+	errNum |= clSetKernelArg(kernel, 4, sizeof(cl_mem), &temp_zones[1]);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting kernel args." << std::endl;
+    }
 
 	int globalX = ((width - 1)/(ThreadsX - 2) + 1) * ThreadsX;
 	int globalY = ((height - 1)/(ThreadsY - 2) + 1) * ThreadsY;
@@ -1004,17 +1172,17 @@ if(show_debug)
 	//std::cout << "\tcompute - " << completeEvent(prof_event, commandQueue) << " ms" << std::endl;
 
 	// read required part of buffer
-	int* output = new int[width*(height-2)];
-	cl_event prof_read;
+	int* output = new int[width];
+	cl_event read_event;
 	errNum = clEnqueueReadBuffer(commandQueue, 
 		temp_zones[1],
-		CL_TRUE,
+		CL_FALSE,
 		sizeof(int) * width,
 		sizeof(int) * width,
 		output,
 		0,
 		NULL,
-		&prof_read);
+		&read_event);
     if (errNum != CL_SUCCESS)
     {
 		std::cerr << errNum << std::endl;
@@ -1022,6 +1190,13 @@ if(show_debug)
     }
 	//std::cout << "\tread - " << completeEvent(prof_read, commandQueue) << " ms" << std::endl;
 
+	errNum = clSetEventCallback(read_event, CL_COMPLETE, &transmit_bottom_ghost, output);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error setting event callback (read)." << std::endl;
+    }
+/*
 if(show_debug)
 {
 	std::cout << "BOTTOM ghost zone to send" << std::endl; 
@@ -1031,13 +1206,12 @@ if(show_debug)
 		std::cout << output[y] << " ";
 	}
 	std::cout << std::endl; 
-
 }
-
+*/
 	clReleaseEvent(prof_event);
-	clReleaseEvent(prof_read);
+	//clReleaseEvent(prof_read);
 
-	delete [] output;
+	//delete [] output;
 
     return 0;
 }
@@ -1287,8 +1461,6 @@ void check_compute()
 	int width = imWidth;
 	int height = imHeight;
 
-	clFinish(commandQueue);
-
 	// read output buffer
 	int* output = new int[width*height];
 	//cl_event prof_read;
@@ -1367,6 +1539,8 @@ void check_compute()
 			std::cout << std::endl; 
 		}
 		std::cout << std::endl; 
+		std::cout << "CHECK ERRORS!" << std::endl; 
+		system("pause");
 	}
 	else
 		std::cout << "No errors found " << std::endl;
@@ -1375,8 +1549,48 @@ void check_compute()
 	delete [] check;
 }
 
+cl_int swap_io()
+{
+	cl_int errNum;
+	int width = imWidth;
+	int height = imHeight;
+
+	// set kernel arguments to compute,
+	// sub buffers require no need for offset
+    errNum = clSetKernelArg(copy_kernel, 0, sizeof(cl_mem), &conway_in);
+	errNum |= clSetKernelArg(copy_kernel, 1, sizeof(cl_mem), &conway_out);
+
+    size_t localWorkSize[2] = { ThreadsX, ThreadsY } ;
+    size_t globalWorkSize[2] =  {  width, height };
+
+if(show_debug)
+{
+	std::cout << "Swap IO Work Sizes" << std::endl; 
+	std::cout << "Global size " << width << ", " << height << std::endl;
+	std::cout << "Local size " << ThreadsX << ", " << ThreadsY << std::endl;
+	std::cout << std::endl;
+}
+
+	//cl_event prof_event;
+	// compute
+    errNum = clEnqueueNDRangeKernel(commandQueue, copy_kernel, 2, NULL,
+                                    globalWorkSize, localWorkSize,
+                                    0, NULL, NULL);//&prof_event);
+    if (errNum != CL_SUCCESS)
+    {
+		std::cerr << errNum << std::endl;
+        std::cerr << "Error queuing conway kernel top for execution." << std::endl;
+    }
+
+	//std::cout << "\tcompute - " << completeEvent(prof_event, commandQueue) << " ms" << std::endl;
+
+	//clReleaseEvent(prof_event);
+
+    return 0;
+}
+
 ///
-//      main() for GLinterop example
+//      main() 
 //
 int main(int argc, char** argv)
 {
@@ -1425,14 +1639,23 @@ int main(int argc, char** argv)
     kernel = clCreateKernel(program, "conway_kernel", NULL);
     if (kernel == NULL)
     {
-        std::cerr << "Failed to create output kernel" << std::endl;
+        std::cerr << "Failed to create conway kernel" << std::endl;
+        Cleanup();
+        return 1;
+    }
+
+	// Create OpenCL kernel
+    copy_kernel = clCreateKernel(program, "copy_kernel", NULL);
+    if (copy_kernel == NULL)
+    {
+        std::cerr << "Failed to create copy kernel" << std::endl;
         Cleanup();
         return 1;
     }
 
 	// insert simulation loop here
-	//for(int j = 0; j < 100; j++)
-	//{
+	for(int j = 0; j < 100; j++)
+	{
 		// compute pass to calculate correct output buffer
 		// conway_check will not have updated ghost zones
 		compute_check();
@@ -1458,6 +1681,8 @@ if(show_debug)
 	//	print_input();
 	//	std::cout << "swapping input and output" << std::endl; 
 	//	std::swap<cl_mem>(conway_in, conway_out);
+	//	std::swap<cl_mem>(sub_buffer_in[1], sub_buffer_out);
+	swap_io();
 	//	std::cout << "input after" << std::endl; 
 	//	print_input();
 
@@ -1466,13 +1691,13 @@ if(show_debug)
 	//	print_sub_1();
 	//	print_sub_2();
 
-	//	system("pause");
-	//}
+		system("pause");
+	}
 
     std::cout << std::endl;
     std::cout << "Executed program succesfully." << std::endl;
     Cleanup();
 
-	system("pause");
+	//system("pause");
     return 0;
 }
