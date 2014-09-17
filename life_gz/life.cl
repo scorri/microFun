@@ -103,3 +103,11 @@ __kernel void conway_kernel(__global int *conway_in,
 		conway_out[idx] = nextState;
 	}
 }
+
+__kernel void copy_kernel(__global int *conway_in,
+							__global int *conway_out)
+{
+	int idx = get_global_id(0);
+
+	conway_out[idx] = conway_in[idx];
+}
